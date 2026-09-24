@@ -77,4 +77,30 @@ func TestParseLFNEntry(t *testing.T) {
 	if !got.IsLast {
 		t.Error("IsLast = false, want true")
 	}
+	
+	if got.Name != "Pictures" {
+		t.Errorf("Name = %q, want %q", got.Name, "Pictures")
+	}
+}
+
+func TestCombineLFN(t *testing.T) {
+	entries := []lfnEntry{
+		{
+			Sequence: 2,
+			Name:     "Beast",
+		},
+		{
+			Sequence: 1,
+			IsLast:   true,
+			Name:     "The Number Of The ",
+		},
+	}
+
+	got := combineLFN(entries)
+
+	want := "The Number Of The Beast"
+
+	if got != want {
+		t.Errorf("Name = %q, want %q", got, want)
+	}
 }

@@ -53,17 +53,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	data, err := fs.ReadRootCluster()
+	// data, err := fs.ReadRootCluster()
+	// if err != nil {
+	// 	fmt.Fprintln(os.Stderr, err)
+	// 	os.Exit(1)
+	// }
+	//
+	// 	fmt.Printf("root cluster: %d bytes\n", len(data))
+	// 	fmt.Printf("%x\n", data[:64])
+	//
+	// 	if err := os.WriteFile("root-cluster.bin", data, 0644); err != nil {
+	// 		fmt.Fprintln(os.Stderr, err)
+	// 		os.Exit(1)
+	// 	}
+
+	entries, err := fs.ReadRootDirectory()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("root cluster: %d bytes\n", len(data))
-	fmt.Printf("%x\n", data[:64])
+	for _, entry := range entries {
+		kind := "FILE"
+		if entry.IsDir {
+			kind = "DIR "
+		}
 
-	if err := os.WriteFile("root-cluster.bin", data, 0644); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Printf(
+			"%-4s %-30s cluster=%-8d size=%d\n",
+			kind,
+			entry.Name,
+			entry.StartCluster,
+			entry.Size,
+		)
 	}
 }

@@ -8,19 +8,23 @@ import (
 )
 
 func TestReadFATEntry(t *testing.T) {
-	// We calculate the FAT entry location correctly
-	const fatOffset = 100
+	const (
+		sectorSize = 512
+		fatOffset  = 512
+	)
 
-	data := make([]byte, fatOffset+16)
+	data := make([]byte, fatOffset+sectorSize)
 
-	// Cluster 2 → cluster 3
 	binary.LittleEndian.PutUint32(
-		data[fatOffset+2*4:],
+		data[fatOffset+2*4:fatOffset+2*4+4],
 		3,
 	)
 
 	fs := &Filesystem{
 		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: sectorSize,
+		},
 		layout: Layout{
 			FATOffset: fatOffset,
 		},
@@ -37,23 +41,25 @@ func TestReadFATEntry(t *testing.T) {
 }
 
 func TestReadFATEntryMasksReservedBits(t *testing.T) {
-	// We interpret the FAT32 entry correctly
+	const (
+		sectorSize = 512
+		fatOffset  = 512
+	)
 
-	const fatOffset = 100
+	data := make([]byte, fatOffset+sectorSize)
 
-	data := make([]byte, fatOffset+16)
-
-	// Lower 28 bits = cluster 3
-	// Upper 4 bits should be ignored
 	value := uint32(0xA0000003)
 
 	binary.LittleEndian.PutUint32(
-		data[fatOffset+2*4:],
+		data[fatOffset+2*4:fatOffset+2*4+4],
 		value,
 	)
 
 	fs := &Filesystem{
 		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: sectorSize,
+		},
 		layout: Layout{
 			FATOffset: fatOffset,
 		},
@@ -70,9 +76,12 @@ func TestReadFATEntryMasksReservedBits(t *testing.T) {
 }
 
 func TestReadClusterChain(t *testing.T) {
-	const fatOffset = 100
+	const (
+		fatOffset  = 512
+		sectorSize = 512
+	)
 
-	data := make([]byte, fatOffset+32)
+	data := make([]byte, fatOffset+sectorSize)
 
 	// 2 → 3 → 4 → 5 → EOF
 	binary.LittleEndian.PutUint32(data[fatOffset+2*4:], 3)
@@ -82,6 +91,9 @@ func TestReadClusterChain(t *testing.T) {
 
 	fs := &Filesystem{
 		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: sectorSize,
+		},
 		layout: Layout{
 			FATOffset: fatOffset,
 		},
@@ -100,9 +112,12 @@ func TestReadClusterChain(t *testing.T) {
 }
 
 func TestReadClusterChainSingleCluster(t *testing.T) {
-	const fatOffset = 100
+	const (
+		fatOffset  = 512
+		sectorSize = 512
+	)
 
-	data := make([]byte, fatOffset+16)
+	data := make([]byte, fatOffset+sectorSize)
 
 	binary.LittleEndian.PutUint32(
 		data[fatOffset+2*4:],
@@ -111,6 +126,9 @@ func TestReadClusterChainSingleCluster(t *testing.T) {
 
 	fs := &Filesystem{
 		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: sectorSize,
+		},
 		layout: Layout{
 			FATOffset: fatOffset,
 		},
