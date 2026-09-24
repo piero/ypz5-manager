@@ -42,3 +42,39 @@ func TestParseDirectoryEntry(t *testing.T) {
 		t.Errorf("Size = %d, want 0", got.Size)
 	}
 }
+
+func TestParseLFNEntry(t *testing.T) {
+	data := []byte{
+		0x41,
+		0x50, 0x00,
+		0x69, 0x00,
+		0x63, 0x00,
+		0x74, 0x00,
+		0x75, 0x00,
+		0x0F,
+		0x00,
+		0x59,
+		0x72, 0x00,
+		0x65, 0x00,
+		0x73, 0x00,
+		0x00, 0x00,
+		0xFF, 0xFF,
+		0xFF, 0xFF,
+		0x00, 0x00,
+		0xFF, 0xFF,
+		0xFF, 0xFF,
+	}
+
+	got, err := parseLFNEntry(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Sequence != 1 {
+		t.Errorf("Sequence = %d, want 1", got.Sequence)
+	}
+	
+	if !got.IsLast {
+		t.Error("IsLast = false, want true")
+	}
+}

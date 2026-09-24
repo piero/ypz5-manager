@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 )
 
 type DirectoryEntry struct {
@@ -53,5 +54,60 @@ func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 		IsDir:        attr&0x10 != 0,
 		Size:         binary.LittleEndian.Uint32(data[0x1C:0x20]),
 		StartCluster: startCluster,
+	}, nil
+}
+
+type lfnEntry struct {
+	Sequence uint8
+	IsLast   bool
+	Name     string
+}
+
+func parseLFNEntry(data []byte) (lfnEntry, error) {
+	if len(data) != 32 {
+		return lfnEntry{}, fmt.Errorf(
+			"LFN entry has %d bytes, want 32",
+			len(data),
+		)
+	}
+
+	if data[0x0B] != 0x0F {
+		return lfnEntry{}, fmt.Errorf(
+			"not an LFN entry: attributes = %#02x",
+			data[0x0B],
+		)
+	}
+
+	sequence := data[0x00]
+
+	var chars []uint16
+
+	// Characters 1–5.
+	for offset := 0x01; offset < 0x0B; offset += 2 {
+		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
+	}
+
+	// Characters 6–11.
+	for offset := 0x0E; offset < 0x1A; offset += 2 {
+		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
+	}
+
+	// Characters 12–13.
+	for offset := 0x1C; offset < 0x20; offset += 2 {
+		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
+	}
+
+	// Stop at the UTF-16 terminator.
+	for i, char := range chars {
+		if char == 0x0000 {
+			chars = chars[:i]
+			break
+		}
+	}
+
+	return lfnEntry{
+		Sequence: sequence & 0x3F,
+		IsLast:   sequence&0x40 != 0,
+		Name:     string(utf16.Decode(chars)),
 	}, nil
 }
