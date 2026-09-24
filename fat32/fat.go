@@ -34,27 +34,6 @@ func (fs *Filesystem) readFATEntry(cluster uint32) (uint32, error) {
 	return value & 0x0FFFFFFF, nil
 }
 
-// func (fs *Filesystem) readFATEntry(cluster uint32) (uint32, error) {
-// 	// FAT entry offset = FAT start + cluster number × 4
-// 	offset := fs.layout.FATOffset + int64(cluster)*4
-// 
-// 	var buf [4]byte
-// 
-// 	if _, err := fs.reader.ReadAt(buf[:], offset); err != nil {
-// 		return 0, fmt.Errorf("read FAT entry for cluster %d: %w", cluster, err)
-// 	}
-// 
-// 	// FAT32 entries use only the lower 28 bits:
-// 	//
-// 	// 31             28 27                         0
-// 	// +----------------+----------------------------+
-// 	// |    reserved    |       cluster number       |
-// 	// +----------------+----------------------------+
-// 	//
-// 	// so we discard the 4 reserved bits.
-// 	return binary.LittleEndian.Uint32(buf[:]) & 0x0FFFFFFF, nil
-// }
-
 func (fs *Filesystem) readClusterChain(start uint32) ([]uint32, error) {
 	/*
 		If start = 2
@@ -126,4 +105,36 @@ func (fs *Filesystem) readClusterChain(start uint32) ([]uint32, error) {
 			cluster = next
 		}
 	}
+}
+
+// FAT entry = 0          → free
+// FAT entry = 2..        → allocated / part of a chain
+// FAT entry >= 0x0FFFFFF8 → end of chain
+// 0x0FFFFFF7             → bad cluster
+func (fs *Filesystem) IsFreeCluster(cluster uint32) (bool, error) {
+	value, err := fs.readFATEntry(cluster)
+	if err != nil {
+		return false, err
+	}
+
+	// We've already masked the FAT entry to 28 bits in readFATEntry()
+	// so this method can simply check for zero.
+	return value == 0, nil
+}
+
+func (fs *Filesystem) FindFreeCluster() (uint32, error) {
+	clusterCount := fs.boot.ClusterCount()
+
+	for cluster := uint32(2); cluster < clusterCount+2; cluster++ {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			return 0, err
+		}
+
+		if free {
+			return cluster, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no free clusters")
 }

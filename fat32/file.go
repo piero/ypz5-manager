@@ -2,6 +2,11 @@ package fat32
 
 import "fmt"
 
+type File struct {
+	entry DirectoryEntry
+	fs    *Filesystem
+}
+
 func (fs *Filesystem) readFile(entry DirectoryEntry) ([]byte, error) {
 	if entry.IsDir {
 		return nil, fmt.Errorf("%q is a directory", entry.Name)
@@ -46,4 +51,32 @@ func (fs *Filesystem) ReadFile(path string) ([]byte, error) {
 	}
 
 	return fs.readFile(entry)
+}
+
+func (fs *Filesystem) OpenFile(path string) (*File, error) {
+	entry, err := fs.findEntry(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if entry.IsDir {
+		return nil, fmt.Errorf("%q is a directory", path)
+	}
+
+	return &File{
+		entry: entry,
+		fs:    fs,
+	}, nil
+}
+
+func (f *File) Name() string {
+	return f.entry.Name
+}
+
+func (f *File) Size() uint32 {
+	return f.entry.Size
+}
+
+func (f *File) ReadAll() ([]byte, error) {
+	return f.fs.readFile(f.entry)
 }

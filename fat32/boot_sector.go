@@ -14,6 +14,7 @@ type BootSector struct {
 	ReservedSectors   uint16
 	NumberOfFATs      uint8
 	SectorsPerFAT     uint32
+	TotalSectors      uint32
 	RootCluster       uint32
 }
 
@@ -30,6 +31,7 @@ func readBootSector(r io.ReaderAt) (BootSector, error) {
 		ReservedSectors:   binary.LittleEndian.Uint16(buf[0x0E:0x10]),
 		NumberOfFATs:      buf[0x10],
 		SectorsPerFAT:     binary.LittleEndian.Uint32(buf[0x24:0x28]),
+		TotalSectors:      binary.LittleEndian.Uint32(buf[0x20:0x24]),
 		RootCluster:       binary.LittleEndian.Uint32(buf[0x2C:0x30]),
 	}, nil
 }
@@ -49,6 +51,10 @@ func (b BootSector) Validate() error {
 
 	if b.SectorsPerFAT == 0 {
 		return fmt.Errorf("invalid sectors per FAT")
+	}
+
+	if b.TotalSectors == 0 {
+		return fmt.Errorf("invalid total sectors: %d", b.TotalSectors)
 	}
 
 	if b.RootCluster < 2 {

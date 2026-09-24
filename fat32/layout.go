@@ -25,3 +25,11 @@ func (b BootSector) Layout() Layout {
 		BytesPerCluster: bytesPerCluster,
 	}
 }
+
+func (b BootSector) ClusterCount() uint32 {
+	dataSectors := b.TotalSectors -
+		uint32(b.ReservedSectors) -
+		uint32(b.NumberOfFATs)*b.SectorsPerFAT
+
+	return dataSectors / uint32(b.SectorsPerCluster)
+}

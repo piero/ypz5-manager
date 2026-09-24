@@ -145,3 +145,100 @@ func TestReadClusterChainSingleCluster(t *testing.T) {
 		t.Fatalf("chain = %v, want %v", got, want)
 	}
 }
+
+func TestIsFreeCluster(t *testing.T) {
+	const fatOffset = 512
+
+	// Fixture
+	//
+	// 	offset 0
+	// 	│
+	// 	│  boot/test area
+	// 	│
+	// 	├── 512  ← FAT starts
+	// 	│
+	// 	│   ┌──────────────────────────────┐
+	// 	│   │ FAT sector (512 bytes)       │
+	// 	│   │                              │
+	// 	│   │ FAT[2] = EOF                 │
+	// 	│   │ FAT[3] = 0 (free)            │
+	// 	│   │                              │
+	// 	│   └──────────────────────────────┘
+	// 	│
+	// 	└── 1024
+	data := make([]byte, fatOffset+512)
+
+	// Cluster 2 is allocated.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+2*4:],
+		fat32EOF,
+	)
+
+	// Cluster 3 is free: leave FAT[3] as zero.
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: 512,
+		},
+		layout: Layout{
+			FATOffset: fatOffset,
+		},
+	}
+
+	free, err := fs.IsFreeCluster(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatal("cluster 2 reported as free")
+	}
+
+	free, err = fs.IsFreeCluster(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatal("cluster 3 reported as allocated")
+	}
+}
+
+func TestFindFreeCluster(t *testing.T) {
+	const fatOffset = 512
+
+	data := make([]byte, fatOffset+512)
+
+	// Cluster 2 is allocated.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+2*4:],
+		fat32EOF,
+	)
+
+	// Cluster 3 is free.
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 1,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      5,
+		},
+		layout: Layout{
+			FATOffset: fatOffset,
+		},
+	}
+
+	cluster, err := fs.FindFreeCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cluster != 3 {
+		t.Fatalf("cluster = %d, want 3", cluster)
+	}
+}
