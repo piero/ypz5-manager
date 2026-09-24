@@ -1,6 +1,10 @@
 package fat32
 
-import "time"
+import (
+	"fmt"
+	"io"
+	"time"
+)
 
 type Entry struct {
 	Name    string
@@ -10,11 +14,27 @@ type Entry struct {
 }
 
 type Filesystem struct {
-	device string
+	reader io.ReaderAt
+	boot   BootSector
 }
 
-func New(device string) *Filesystem {
+func New(reader io.ReaderAt) *Filesystem {
 	return &Filesystem{
-		device: device,
+		reader: reader,
 	}
+}
+
+func (fs *Filesystem) Open() error {
+	boot, err := readBootSector(fs.reader)
+	if err != nil {
+		return err
+	}
+
+	if err := boot.Validate(); err != nil {
+		return fmt.Errorf("invalid FAT32 boot sector: %w", err)
+	}
+
+	fs.boot = boot
+
+	return nil
 }

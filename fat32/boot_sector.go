@@ -33,3 +33,27 @@ func readBootSector(r io.ReaderAt) (BootSector, error) {
 		RootCluster:       binary.LittleEndian.Uint32(buf[0x2C:0x30]),
 	}, nil
 }
+
+func (b BootSector) Validate() error {
+	if b.BytesPerSector == 0 {
+		return fmt.Errorf("invalid bytes per sector")
+	}
+
+	if b.SectorsPerCluster == 0 {
+		return fmt.Errorf("invalid sectors per cluster")
+	}
+
+	if b.NumberOfFATs == 0 {
+		return fmt.Errorf("invalid number of FATs")
+	}
+
+	if b.SectorsPerFAT == 0 {
+		return fmt.Errorf("invalid sectors per FAT")
+	}
+
+	if b.RootCluster < 2 {
+		return fmt.Errorf("invalid root cluster: %d", b.RootCluster)
+	}
+
+	return nil
+}

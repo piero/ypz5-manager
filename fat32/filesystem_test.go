@@ -7,12 +7,13 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	const device = "/dev/rdisk4s1"
+	data := []byte("test filesystem")
+	reader := bytes.NewReader(data)
 
-	fs := New(device)
+	fs := New(reader)
 
-	if fs.device != device {
-		t.Fatalf("device = %q, want %q", fs.device, device)
+	if fs.reader != reader {
+		t.Fatalf("reader = %v, want %v", fs.reader, reader)
 	}
 }
 
@@ -53,5 +54,30 @@ func TestBootSector(t *testing.T) {
 
 	if got.RootCluster != 2 {
 		t.Errorf("RootCluster = %d, want 2", got.RootCluster)
+	}
+}
+
+func TestBootSectorLayout(t *testing.T) {
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   36,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     3862,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	if layout.FATOffset != 18432 {
+		t.Errorf("FATOffset = %d, want 18432", layout.FATOffset)
+	}
+
+	if layout.DataOffset != 3973120 {
+		t.Errorf("DataOffset = %d, want 3973120", layout.DataOffset)
+	}
+
+	if layout.BytesPerCluster != 4096 {
+		t.Errorf("BytesPerCluster = %d, want 4096", layout.BytesPerCluster)
 	}
 }
