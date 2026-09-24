@@ -16,6 +16,7 @@ type model struct {
 	entries []fat32.DirectoryEntry
 	cursor  int
 	err     error
+	file    *fat32.DirectoryEntry
 }
 
 func (m model) Init() tea.Cmd {
@@ -23,6 +24,24 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	/*
+	 NAVIGATION:
+
+	 Directory
+	   │
+	   ├── Enter on directory ──> Directory
+	   │                           m.file = nil
+	   │
+	   └── Enter on file ────────> File view
+	                               m.file != nil
+	                                   │
+	                              Backspace/h
+	                                   │
+	                                   ▼
+	                               Directory
+	                               m.file = nil
+	*/
+
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -47,6 +66,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			entry := m.entries[m.cursor]
 
 			if !entry.IsDir {
+				m.file = &entry
 				return m, nil
 			}
 
@@ -65,8 +85,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.path = path
 			m.entries = entries
 			m.cursor = 0
+			m.file = nil
 
 		case "backspace", "h":
+			if m.file != nil {
+				m.file = nil
+				return m, nil
+			}
+
 			if m.path == "/" {
 				return m, nil
 			}
@@ -91,6 +117,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() tea.View {
 	if m.err != nil {
 		return tea.NewView(fmt.Sprintf("Error: %v\n", m.err))
+	}
+
+	if m.file != nil {
+		return m.fileView()
 	}
 
 	var s string
@@ -139,6 +169,22 @@ func parentPath(path string) string {
 	}
 
 	return path[:index]
+}
+
+func (m model) fileView() tea.View {
+	entry := m.file
+
+	var s string
+
+	s += "YPZ5 Manager\n\n"
+	s += fmt.Sprintf("Path: %s\n\n", m.path)
+	s += fmt.Sprintf("Name:          %s\n", entry.Name)
+	s += fmt.Sprint("Type:          File\n")
+	s += fmt.Sprintf("Size:          %d bytes\n", entry.Size)
+	s += fmt.Sprintf("Start cluster: %d\n", entry.StartCluster)
+	s += "\nBackspace/h: back   q: quit\n"
+
+	return tea.NewView(s)
 }
 
 func main() {
