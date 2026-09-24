@@ -16,6 +16,7 @@ type Entry struct {
 type Filesystem struct {
 	reader io.ReaderAt
 	boot   BootSector
+	layout Layout
 }
 
 func New(reader io.ReaderAt) *Filesystem {
@@ -35,6 +36,7 @@ func (fs *Filesystem) Open() error {
 	}
 
 	fs.boot = boot
+	fs.layout = boot.Layout()
 
 	return nil
 }
