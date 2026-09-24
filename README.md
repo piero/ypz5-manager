@@ -33,3 +33,25 @@ initially targeted at the Samsung YP-Z5 player.
          ▼
    /dev/rdisk4s1
 ```
+
+The FAT32 package allows navigating the filesystem without knowing anything about physical sectors:
+
+```
+readBootSector()
+       │
+       ▼
+   BootSector
+       │
+       ▼
+     Layout
+       │
+       ├───────────────┐
+       ▼               ▼
+readFATEntry()    readCluster()
+       │               │
+       ▼               ▼
+cluster number      raw bytes
+       │
+       ▼
+readClusterChain()
+```
