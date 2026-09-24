@@ -73,11 +73,11 @@ func TestParseLFNEntry(t *testing.T) {
 	if got.Sequence != 1 {
 		t.Errorf("Sequence = %d, want 1", got.Sequence)
 	}
-	
+
 	if !got.IsLast {
 		t.Error("IsLast = false, want true")
 	}
-	
+
 	if got.Name != "Pictures" {
 		t.Errorf("Name = %q, want %q", got.Name, "Pictures")
 	}
@@ -102,5 +102,57 @@ func TestCombineLFN(t *testing.T) {
 
 	if got != want {
 		t.Errorf("Name = %q, want %q", got, want)
+	}
+}
+
+func TestFindRoot(t *testing.T) {
+	// We'll add the actual filesystem fixture here later.
+}
+
+func TestCombineLFNMultipleEntries(t *testing.T) {
+	entries := []lfnEntry{
+		{
+			Sequence: 3,
+			Name:     "Beast",
+		},
+		{
+			Sequence: 2,
+			Name:     "Number Of The ",
+		},
+		{
+			Sequence: 1,
+			IsLast:   true,
+			Name:     "The ",
+		},
+	}
+
+	got := combineLFN(entries)
+
+	want := "The Number Of The Beast"
+
+	if got != want {
+		t.Fatalf("Name = %q, want %q", got, want)
+	}
+}
+
+func TestCombineLFNUsesSequenceOrder(t *testing.T) {
+	entries := []lfnEntry{
+		{
+			Sequence: 2,
+			Name:     "Beast",
+		},
+		{
+			Sequence: 1,
+			IsLast:   true,
+			Name:     "The Number Of The ",
+		},
+	}
+
+	got := combineLFN(entries)
+
+	want := "The Number Of The Beast"
+
+	if got != want {
+		t.Fatalf("Name = %q, want %q", got, want)
 	}
 }

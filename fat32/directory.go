@@ -187,8 +187,13 @@ func (fs *Filesystem) ReadRootDirectory() ([]DirectoryEntry, error) {
 	return fs.readDirectory(fs.boot.RootCluster)
 }
 
-func (fs *Filesystem) ReadDir(startCluster uint32) ([]DirectoryEntry, error) {
-	entries, err := fs.readDirectory(startCluster)
+func (fs *Filesystem) ReadDir(path string) ([]DirectoryEntry, error) {
+	dir, err := fs.Find(path)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := fs.readDirectory(dir.StartCluster)
 	if err != nil {
 		return nil, err
 	}
@@ -204,4 +209,55 @@ func (fs *Filesystem) ReadDir(startCluster uint32) ([]DirectoryEntry, error) {
 	}
 
 	return filtered, nil
+}
+
+func (fs *Filesystem) Find(path string) (DirectoryEntry, error) {
+	if path == "/" {
+		return DirectoryEntry{
+			Name:         "/",
+			IsDir:        true,
+			StartCluster: fs.RootCluster(),
+		}, nil
+	}
+
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+
+	currentCluster := fs.RootCluster()
+
+	for _, part := range parts {
+		entries, err := fs.readDirectory(currentCluster)
+		if err != nil {
+			return DirectoryEntry{}, err
+		}
+
+		found := false
+
+		for _, entry := range entries {
+			if entry.Name == part {
+				if !entry.IsDir {
+					return DirectoryEntry{}, fmt.Errorf(
+						"%q is not a directory",
+						part,
+					)
+				}
+
+				currentCluster = entry.StartCluster
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return DirectoryEntry{}, fmt.Errorf(
+				"directory not found: %s",
+				path,
+			)
+		}
+	}
+
+	return DirectoryEntry{
+		Name:         parts[len(parts)-1],
+		IsDir:        true,
+		StartCluster: currentCluster,
+	}, nil
 }
