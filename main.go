@@ -5,6 +5,7 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/piero/ypz5/fat32"
 )
 
 // Application state
@@ -34,8 +35,35 @@ func (m model) View() tea.View {
 }
 
 func main() {
-	if _, err := tea.NewProgram(model{}).Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+	// if _, err := tea.NewProgram(model{}).Run(); err != nil {
+	// 	fmt.Fprintln(os.Stderr, "Error:", err)
+	// 	os.Exit(1)
+	// }
+	f, err := os.Open("/dev/rdisk4s1")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	fs := fat32.New(f)
+
+	if err := fs.Open(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	data, err := fs.ReadRootCluster()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("root cluster: %d bytes\n", len(data))
+	fmt.Printf("%x\n", data[:64])
+
+	if err := os.WriteFile("root-cluster.bin", data, 0644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

@@ -29,3 +29,7 @@ func (fs *Filesystem) readCluster(cluster uint32) ([]byte, error) {
 
 	return data, nil
 }
+
+func (fs *Filesystem) ReadRootCluster() ([]byte, error) {
+	return fs.readCluster(fs.boot.RootCluster)
+}
