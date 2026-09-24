@@ -186,3 +186,22 @@ func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, erro
 func (fs *Filesystem) ReadRootDirectory() ([]DirectoryEntry, error) {
 	return fs.readDirectory(fs.boot.RootCluster)
 }
+
+func (fs *Filesystem) ReadDir(startCluster uint32) ([]DirectoryEntry, error) {
+	entries, err := fs.readDirectory(startCluster)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := entries[:0]
+
+	for _, entry := range entries {
+		if entry.Name == "." || entry.Name == ".." {
+			continue
+		}
+
+		filtered = append(filtered, entry)
+	}
+
+	return filtered, nil
+}

@@ -40,3 +40,7 @@ func (fs *Filesystem) Open() error {
 
 	return nil
 }
+
+func (fs *Filesystem) RootCluster() uint32 {
+	return fs.boot.RootCluster
+}
