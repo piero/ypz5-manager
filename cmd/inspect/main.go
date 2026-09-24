@@ -66,4 +66,14 @@ func main() {
 			entry.Size,
 		)
 	}
+
+	fmt.Println("\nNew test")
+	data, err := fs.ReadFile("/Music/Cartoni animati/Pollon.mp3")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fs.ReadFile:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("read %d bytes\n", len(data))
+	fmt.Printf("first 32 bytes: %q\n", data[:min(32, len(data))])
 }

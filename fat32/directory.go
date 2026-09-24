@@ -212,52 +212,17 @@ func (fs *Filesystem) ReadDir(path string) ([]DirectoryEntry, error) {
 }
 
 func (fs *Filesystem) Find(path string) (DirectoryEntry, error) {
-	if path == "/" {
-		return DirectoryEntry{
-			Name:         "/",
-			IsDir:        true,
-			StartCluster: fs.RootCluster(),
-		}, nil
+	entry, err := fs.findEntry(path)
+	if err != nil {
+		return DirectoryEntry{}, err
 	}
 
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-
-	currentCluster := fs.RootCluster()
-
-	for _, part := range parts {
-		entries, err := fs.readDirectory(currentCluster)
-		if err != nil {
-			return DirectoryEntry{}, err
-		}
-
-		found := false
-
-		for _, entry := range entries {
-			if entry.Name == part {
-				if !entry.IsDir {
-					return DirectoryEntry{}, fmt.Errorf(
-						"%q is not a directory",
-						part,
-					)
-				}
-
-				currentCluster = entry.StartCluster
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return DirectoryEntry{}, fmt.Errorf(
-				"directory not found: %s",
-				path,
-			)
-		}
+	if !entry.IsDir {
+		return DirectoryEntry{}, fmt.Errorf(
+			"%q is not a directory",
+			path,
+		)
 	}
 
-	return DirectoryEntry{
-		Name:         parts[len(parts)-1],
-		IsDir:        true,
-		StartCluster: currentCluster,
-	}, nil
+	return entry, nil
 }

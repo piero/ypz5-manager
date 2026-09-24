@@ -38,3 +38,12 @@ func (fs *Filesystem) readFile(entry DirectoryEntry) ([]byte, error) {
 
 	return data[:entry.Size], nil
 }
+
+func (fs *Filesystem) ReadFile(path string) ([]byte, error) {
+	entry, err := fs.findEntry(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return fs.readFile(entry)
+}

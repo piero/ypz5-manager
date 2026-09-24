@@ -37,21 +37,15 @@ initially targeted at the Samsung YP-Z5 player.
 The FAT32 package allows navigating the filesystem without knowing anything about physical sectors:
 
 ```
-readBootSector()
-       │
-       ▼
-   BootSector
-       │
-       ▼
-     Layout
-       │
-       ├───────────────┐
-       ▼               ▼
-readFATEntry()    readCluster()
-       │               │
-       ▼               ▼
-cluster number      raw bytes
-       │
-       ▼
-readClusterChain()
+boot sector
+    ↓
+FAT layout
+    ↓
+FAT entries
+    ↓
+cluster chain
+    ↓
+directory entries / LFN
+    ↓
+file contents
 ```
