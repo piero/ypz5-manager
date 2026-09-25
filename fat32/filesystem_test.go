@@ -625,3 +625,13 @@ func TestDeleteDirectoryRecordMultipleLFN(t *testing.T) {
 		)
 	}
 }
+
+func TestNewIsReadOnly(t *testing.T) {
+	data := make([]byte, 4096)
+
+	fs := New(bytes.NewReader(data))
+
+	if err := fs.writable(); err == nil {
+		t.Fatal("read-only filesystem unexpectedly has write access")
+	}
+}

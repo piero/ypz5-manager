@@ -21,14 +21,14 @@ func TestReadFATEntry(t *testing.T) {
 		3,
 	)
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: sectorSize,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	got, err := fs.readFATEntry(2)
@@ -56,14 +56,14 @@ func TestReadFATEntryMasksReservedBits(t *testing.T) {
 		value,
 	)
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: sectorSize,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	got, err := fs.readFATEntry(2)
@@ -90,14 +90,14 @@ func TestReadClusterChain(t *testing.T) {
 	binary.LittleEndian.PutUint32(data[fatOffset+4*4:], 5)
 	binary.LittleEndian.PutUint32(data[fatOffset+5*4:], fat32EOF)
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: sectorSize,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	got, err := fs.readClusterChain(2)
@@ -125,14 +125,14 @@ func TestReadClusterChainSingleCluster(t *testing.T) {
 		fat32EOF,
 	)
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: sectorSize,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	got, err := fs.readClusterChain(2)
@@ -176,15 +176,12 @@ func TestIsFreeCluster(t *testing.T) {
 	)
 
 	// Cluster 3 is free: leave FAT[3] as zero.
-
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: 512,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+	fs.boot = BootSector{
+		BytesPerSector: 512,
+	}
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	free, err := fs.IsFreeCluster(2)
@@ -219,19 +216,17 @@ func TestFindFreeCluster(t *testing.T) {
 
 	// Cluster 3 is free.
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector:    512,
-			SectorsPerCluster: 1,
-			ReservedSectors:   1,
-			NumberOfFATs:      1,
-			SectorsPerFAT:     1,
-			TotalSectors:      5,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 1,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      5,
+	}
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	cluster, err := fs.FindFreeCluster(2)
@@ -267,14 +262,14 @@ func TestClusterChain(t *testing.T) {
 		fat32EOF,
 	)
 
-	fs := &Filesystem{
-		reader: bytes.NewReader(data),
-		boot: BootSector{
-			BytesPerSector: sectorSize,
-		},
-		layout: Layout{
-			FATOffset: fatOffset,
-		},
+	fs := New(bytes.NewReader(data))
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
 	}
 
 	got, err := fs.ClusterChain(2)
@@ -317,10 +312,10 @@ func TestWriteFATEntry(t *testing.T) {
 		0xF0000005,
 	)
 
-	reader := bytes.NewReader(data)
-	fs := New(reader)
-	fs.writer = writerAtBuffer{data: data}
-
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		writerAtBuffer{data: data},
+	)
 	fs.boot = boot
 	fs.layout = layout
 
@@ -404,8 +399,10 @@ func TestFreeClusterChain(t *testing.T) {
 		)
 	}
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		writerAtBuffer{data: data},
+	)
 	fs.boot = boot
 	fs.layout = layout
 

@@ -186,8 +186,10 @@ func TestDeleteDirectoryRecord(t *testing.T) {
 	data[directoryOffset+64] = 0x50
 	data[directoryOffset+96] = 0x42
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		writerAtBuffer{data: data},
+	)
 	fs.boot = boot
 	fs.layout = layout
 

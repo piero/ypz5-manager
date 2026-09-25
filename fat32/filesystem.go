@@ -20,6 +20,7 @@ type Filesystem struct {
 	layout Layout
 }
 
+// read-only
 func New(reader io.ReaderAt) *Filesystem {
 	fs := &Filesystem{
 		reader: reader,
@@ -30,6 +31,14 @@ func New(reader io.ReaderAt) *Filesystem {
 	}
 
 	return fs
+}
+
+// read-write
+func NewReadWrite(reader io.ReaderAt, writer io.WriterAt) *Filesystem {
+	return &Filesystem{
+		reader: reader,
+		writer: writer,
+	}
 }
 
 func (fs *Filesystem) writable() error {
@@ -101,11 +110,4 @@ func (fs *Filesystem) Delete(path string) error {
 	}
 
 	return nil
-}
-
-func NewReadWrite(reader io.ReaderAt, writer io.WriterAt) *Filesystem {
-	return &Filesystem{
-		reader: reader,
-		writer: writer,
-	}
 }
