@@ -588,3 +588,76 @@ func TestWriteFATEntryRollbackFailure(t *testing.T) {
 		t.Fatalf("error = %q, want rollback failure", err)
 	}
 }
+
+func TestFreeClusterChainWriteFailure(t *testing.T) {
+	data := make([]byte, 4096)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 1,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	// Chain: 3 -> 4 -> 5 -> EOF.
+	for fat := uint8(0); fat < boot.NumberOfFATs; fat++ {
+		fatOffset := layout.FATOffset +
+			int64(fat)*int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+		binary.LittleEndian.PutUint32(
+			data[fatOffset+3*4:fatOffset+3*4+4],
+			4,
+		)
+
+		binary.LittleEndian.PutUint32(
+			data[fatOffset+4*4:fatOffset+4*4+4],
+			5,
+		)
+
+		binary.LittleEndian.PutUint32(
+			data[fatOffset+5*4:fatOffset+5*4+4],
+			fat32EOF,
+		)
+	}
+
+	writer := &failingWriterAt{
+		data:      data,
+		failAfter: 2,
+	}
+
+	fs := NewReadWrite(bytes.NewReader(data), writer)
+	fs.boot = boot
+	fs.layout = layout
+
+	err := fs.freeClusterChain(3)
+	if err == nil {
+		t.Fatal("freeClusterChain unexpectedly succeeded")
+	}
+
+	t.Logf("freeClusterChain failed as expected: %v", err)
+
+	for fat := uint8(0); fat < boot.NumberOfFATs; fat++ {
+		fatOffset := layout.FATOffset +
+			int64(fat)*int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+		cluster3 := binary.LittleEndian.Uint32(
+			data[fatOffset+3*4 : fatOffset+3*4+4],
+		)
+
+		cluster4 := binary.LittleEndian.Uint32(
+			data[fatOffset+4*4 : fatOffset+4*4+4],
+		)
+
+		t.Logf(
+			"FAT %d: cluster 3 = %#08x, cluster 4 = %#08x",
+			fat+1,
+			cluster3,
+			cluster4,
+		)
+	}
+}
