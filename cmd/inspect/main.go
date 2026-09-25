@@ -8,9 +8,10 @@ import (
 )
 
 func main() {
-	fmt.Println("opening device...")
+	deviceName := "/dev/rdisk4s1"
+	fmt.Println("opening device:", deviceName)
 
-	f, err := os.Open("/dev/rdisk4s1")
+	f, err := os.Open(deviceName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open:", err)
 		os.Exit(1)
@@ -73,16 +74,19 @@ func main() {
 		}
 
 		fmt.Printf(
-			"%-4s %-50s cluster=%-8d size=%d\n",
+			"%-4s %-50s cluster=%-8d size=%-8d dirCluster=%-8d dirOffset=%d\n",
 			kind,
 			entry.Name,
 			entry.StartCluster,
 			entry.Size,
+			entry.EntryCluster,
+			entry.EntryOffset,
 		)
 	}
 
-	fmt.Println("\nNew test")
-	data, err := fs.ReadFile("/Music/Cartoni animati/Pollon.mp3")
+	filePath := "/Music/Cartoni animati/Pollon.mp3"
+	fmt.Println("\nTesting", filePath)
+	data, err := fs.ReadFile(filePath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fs.ReadFile:", err)
 		os.Exit(1)
@@ -90,4 +94,45 @@ func main() {
 
 	fmt.Printf("read %d bytes\n", len(data))
 	fmt.Printf("first 32 bytes: %q\n", data[:min(32, len(data))])
+
+	entry, err := fs.Lookup(filePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "lookup:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf(
+		"directory entry: cluster=%d offset=%d LFN entries=%d\n",
+		entry.EntryCluster,
+		entry.EntryOffset,
+		entry.LFNEntries,
+	)
+
+	chain, err := fs.ClusterChain(entry.StartCluster)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cluster chain:", err)
+		os.Exit(1)
+	}
+
+	expectedClusters := (uint64(entry.Size) +
+		uint64(fs.BootSector().BytesPerSector)*
+			uint64(fs.BootSector().SectorsPerCluster) - 1) /
+		(uint64(fs.BootSector().BytesPerSector) *
+			uint64(fs.BootSector().SectorsPerCluster))
+
+	fmt.Printf("file size:          %d bytes\n", entry.Size)
+	fmt.Printf("cluster size:       %d bytes\n",
+		fs.BootSector().BytesPerSector*
+			uint16(fs.BootSector().SectorsPerCluster))
+	fmt.Printf("cluster chain size: %d\n", len(chain))
+	fmt.Printf("expected clusters:  %d\n", expectedClusters)
+	fmt.Printf("first cluster:      %d\n", chain[0])
+	fmt.Printf("last cluster:       %d\n", chain[len(chain)-1])
+
+	fmt.Println("\nInspecting directory entries around Pollon.mp3")
+
+	if err := fs.DebugDirectory("/Music/Cartoni animati"); err != nil {
+		fmt.Fprintln(os.Stderr, "debug directory:", err)
+		os.Exit(1)
+	}
 }

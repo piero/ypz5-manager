@@ -13,6 +13,10 @@ type DirectoryEntry struct {
 	IsDir        bool
 	Size         uint32
 	StartCluster uint32
+
+	EntryCluster uint32
+	EntryOffset  uint32
+	LFNEntries   uint8
 }
 
 func parseShortName(data []byte) string {
@@ -60,6 +64,7 @@ func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 type lfnEntry struct {
 	Sequence uint8
 	IsLast   bool
+	Checksum byte
 	Name     string
 }
 
@@ -108,6 +113,7 @@ func parseLFNEntry(data []byte) (lfnEntry, error) {
 	return lfnEntry{
 		Sequence: sequence & 0x3F,
 		IsLast:   sequence&0x40 != 0,
+		Checksum: data[0x0D],
 		Name:     string(utf16.Decode(chars)),
 	}, nil
 }
@@ -168,11 +174,29 @@ func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, erro
 				return nil, err
 			}
 
+			// validate checksum
+			if len(lfn) > 0 {
+				checksum := shortNameChecksum(entry)
+
+				for _, lfnEntry := range lfn {
+					if lfnEntry.Checksum != checksum {
+						return nil, fmt.Errorf(
+							"LFN checksum mismatch for %q",
+							dirEntry.ShortName,
+						)
+					}
+				}
+			}
+
 			if len(lfn) > 0 {
 				dirEntry.Name = combineLFN(lfn)
+				dirEntry.LFNEntries = uint8(len(lfn))
 			} else {
 				dirEntry.Name = dirEntry.ShortName
 			}
+
+			dirEntry.EntryCluster = cluster
+			dirEntry.EntryOffset = uint32(offset)
 
 			entries = append(entries, dirEntry)
 
@@ -225,4 +249,62 @@ func (fs *Filesystem) Find(path string) (DirectoryEntry, error) {
 	}
 
 	return entry, nil
+}
+
+func (fs *Filesystem) DebugDirectory(path string) error {
+	dir, err := fs.Find(path)
+	if err != nil {
+		return err
+	}
+
+	clusters, err := fs.readClusterChain(dir.StartCluster)
+	if err != nil {
+		return err
+	}
+
+	for _, cluster := range clusters {
+		data, err := fs.readCluster(cluster)
+		if err != nil {
+			return err
+		}
+
+		for offset := 0; offset < len(data); offset += 32 {
+			entry := data[offset : offset+32]
+
+			if entry[0] == 0x00 {
+				return nil
+			}
+
+			if entry[0] == 0xE5 {
+				continue
+			}
+
+			// Only print entries around Pollon's known location for now.
+			if cluster == 169063 &&
+				offset >= 2200 &&
+				offset <= 2400 {
+				fmt.Printf(
+					"cluster=%d offset=%d first=%02X attr=%02X\n",
+					cluster,
+					offset,
+					entry[0],
+					entry[0x0B],
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+func shortNameChecksum(data []byte) byte {
+	var checksum byte
+
+	for i := 0; i < 11; i++ {
+		checksum = ((checksum & 1) << 7) +
+			(checksum >> 1) +
+			data[i]
+	}
+
+	return checksum
 }

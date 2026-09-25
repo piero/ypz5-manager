@@ -140,3 +140,7 @@ func (fs *Filesystem) FindFreeCluster(start uint32) (uint32, error) {
 
 	return 0, fmt.Errorf("no free clusters")
 }
+
+func (fs *Filesystem) ClusterChain(start uint32) ([]uint32, error) {
+    return fs.readClusterChain(start)
+}

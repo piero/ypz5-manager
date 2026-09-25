@@ -242,3 +242,48 @@ func TestFindFreeCluster(t *testing.T) {
 		t.Fatalf("cluster = %d, want 3", cluster)
 	}
 }
+
+func TestClusterChain(t *testing.T) {
+	const (
+		fatOffset  = 512
+		sectorSize = 512
+	)
+
+	data := make([]byte, fatOffset+sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+2*4:],
+		3,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+3*4:],
+		4,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+4*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector: sectorSize,
+		},
+		layout: Layout{
+			FATOffset: fatOffset,
+		},
+	}
+
+	got, err := fs.ClusterChain(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []uint32{2, 3, 4}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("chain = %v, want %v", got, want)
+	}
+}
