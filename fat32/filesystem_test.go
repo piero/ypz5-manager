@@ -209,7 +209,7 @@ func TestDeleteWriteFailure(t *testing.T) {
 	reader := bytes.NewReader(data)
 	writer := &failingWriterAt{
 		data:      data,
-		failAfter: 2,
+		failAfter: 4,
 	}
 
 	fs := NewReadWrite(reader, writer)
@@ -220,14 +220,14 @@ func TestDeleteWriteFailure(t *testing.T) {
 		t.Fatal("Delete unexpectedly succeeded")
 	}
 
-	// The directory entries should still be intact because the
-	// deletion did not complete.
-	if got := data[directoryOffset]; got == 0xE5 {
-		t.Fatal("LFN entry was unexpectedly marked deleted")
+	// The directory entries must have been deleted before we started
+	// freeing the file's clusters.
+	if got := data[directoryOffset]; got != 0xE5 {
+		t.Fatalf("LFN entry was not marked deleted: got %#x", got)
 	}
 
-	if got := data[directoryOffset+32]; got == 0xE5 {
-		t.Fatal("short entry was unexpectedly marked deleted")
+	if got := data[directoryOffset+32]; got != 0xE5 {
+		t.Fatalf("short entry was not marked deleted: got %#x", got)
 	}
 
 	// Cluster 3 was freed before the failure.

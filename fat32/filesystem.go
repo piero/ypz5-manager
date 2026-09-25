@@ -93,7 +93,11 @@ func (fs *Filesystem) Delete(path string) error {
 		return err
 	}
 
-	// FAT freed → directory deletion failure → file still appears, but its clusters are free
+	// Mark the directory entries as deleted first.
+	// If this fails, the file remains intact and its clusters remain allocated.
+	if err := fs.deleteDirectoryRecord(record); err != nil {
+		return err
+	}
 
 	// Release the file's clusters.
 	for _, cluster := range chain {
@@ -104,11 +108,6 @@ func (fs *Filesystem) Delete(path string) error {
 				err,
 			)
 		}
-	}
-
-	// Mark the directory entries as deleted.
-	if err := fs.deleteDirectoryRecord(record); err != nil {
-		return err
 	}
 
 	return nil
