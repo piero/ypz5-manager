@@ -150,7 +150,7 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 		return err
 	}
 
-	if cluster > fs.boot.MaxCluster() {
+	if cluster < 2 || cluster > fs.boot.MaxCluster() {
 		return fmt.Errorf("invalid cluster: %d", cluster)
 	}
 

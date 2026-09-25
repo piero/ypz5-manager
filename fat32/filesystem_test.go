@@ -630,3 +630,224 @@ func TestNewIsReadOnly(t *testing.T) {
 		t.Fatal("read-only filesystem unexpectedly has write access")
 	}
 }
+
+func TestDeleteEmptyFile(t *testing.T) {
+	data := make([]byte, 16384)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	// FAT chain:
+	//
+	// root directory: 2 -> EOF
+	// empty file:      no allocated clusters (start cluster 0)
+	fatValues := map[uint32]uint32{
+		2: fat32EOF,
+	}
+
+	secondFAT := layout.FATOffset +
+		int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+	for cluster, value := range fatValues {
+		offset := layout.FATOffset + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+
+		offset = secondFAT + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+	}
+
+	// Root directory is cluster 2.
+	directoryOffset := layout.DataOffset
+
+	// Short entry at offset 0.
+	short := data[directoryOffset : directoryOffset+32]
+
+	copy(short[0:11], []byte("EMPTY   TXT"))
+	short[11] = 0x20 // archive
+
+	// Start cluster = 0, size = 0.
+	binary.LittleEndian.PutUint16(short[20:22], 0)
+	binary.LittleEndian.PutUint16(short[26:28], 0)
+	binary.LittleEndian.PutUint32(short[28:32], 0)
+
+	// End of directory marker.
+	data[directoryOffset+32] = 0x00
+
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Delete("/EMPTY.TXT"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The short entry should be marked deleted.
+	if got := data[directoryOffset]; got != 0xE5 {
+		t.Fatalf(
+			"short entry first byte = %#x, want %#x",
+			got,
+			byte(0xE5),
+		)
+	}
+
+	// There were no allocated clusters, so FAT[2] must be unchanged.
+	value, err := fs.readFATEntry(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != fat32EOF {
+		t.Fatalf(
+			"root directory FAT entry = %#x, want %#x",
+			value,
+			fat32EOF,
+		)
+	}
+}
+
+func TestDeleteShortEntryWriteFailure(t *testing.T) {
+	data := make([]byte, 16384)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	// FAT chain:
+	//
+	// root directory: 2 -> EOF
+	// file:           3 -> EOF
+	fatValues := map[uint32]uint32{
+		2: fat32EOF,
+		3: fat32EOF,
+	}
+
+	secondFAT := layout.FATOffset +
+		int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+	for cluster, value := range fatValues {
+		offset := layout.FATOffset + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+
+		offset = secondFAT + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+	}
+
+	directoryOffset := layout.DataOffset
+
+	shortName := []byte("EXAMPL~1TXT")
+
+	// LFN entry at offset 0.
+	lfn := data[directoryOffset : directoryOffset+32]
+	lfn[0] = 0x41
+	lfn[11] = 0x0F
+	lfn[13] = shortNameChecksum(shortName)
+
+	name := []uint16{
+		'E', 'x', 'a', 'm', 'p', 'l', 'e', '.', 't', 'x', 't',
+	}
+
+	for i := range 13 {
+		value := uint16(0xFFFF)
+
+		if i < len(name) {
+			value = name[i]
+		} else if i == len(name) {
+			value = 0x0000
+		}
+
+		switch {
+		case i < 5:
+			binary.LittleEndian.PutUint16(
+				lfn[1+i*2:3+i*2],
+				value,
+			)
+		case i < 11:
+			j := i - 5
+			binary.LittleEndian.PutUint16(
+				lfn[14+j*2:16+j*2],
+				value,
+			)
+		default:
+			j := i - 11
+			binary.LittleEndian.PutUint16(
+				lfn[28+j*2:30+j*2],
+				value,
+			)
+		}
+	}
+
+	// Short entry at offset 32.
+	short := data[directoryOffset+32 : directoryOffset+64]
+	copy(short[0:11], shortName)
+	short[11] = 0x20
+	binary.LittleEndian.PutUint16(short[20:22], 0)
+	binary.LittleEndian.PutUint16(short[26:28], 3)
+	binary.LittleEndian.PutUint32(short[28:32], 9000)
+
+	data[directoryOffset+64] = 0x00
+
+	reader := bytes.NewReader(data)
+	writer := &failingWriterAt{
+		data:      data,
+		failAfter: 1,
+	}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Delete("/Example.txt"); err == nil {
+		t.Fatal("Delete unexpectedly succeeded")
+	}
+
+	// The LFN write succeeded.
+	if got := data[directoryOffset]; got != 0xE5 {
+		t.Fatalf("LFN entry was not marked deleted: got %#x", got)
+	}
+
+	// The short-entry write failed, so the short entry must remain intact.
+	if got := data[directoryOffset+32]; got == 0xE5 {
+		t.Fatal("short entry was unexpectedly marked deleted")
+	}
+
+	// No FAT writes should have happened.
+	free, err := fs.IsFreeCluster(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatal("file cluster was unexpectedly freed")
+	}
+}
