@@ -145,20 +145,79 @@ func (fs *Filesystem) ClusterChain(start uint32) ([]uint32, error) {
 	return fs.readClusterChain(start)
 }
 
-// func (fs *Filesystem) freeClusterChain(start uint32) error {
-// 	if start < 2 {
-// 		return fmt.Errorf("invalid start cluster: %d", start)
-// 	}
-// 
-// 	chain, err := fs.readClusterChain(start)
-// 	if err != nil {
-// 		return err
-// 	}
-// 
-// 	for _, cluster := range chain {
-// 		// TODO: write zero to the FAT entry.
-// 		_ = cluster
-// 	}
-// 
-// 	return nil
-// }
+func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	if cluster > fs.boot.MaxCluster() {
+		return fmt.Errorf("invalid cluster: %d", cluster)
+	}
+
+	value &= 0x0FFFFFFF
+
+	sectorSize := int64(fs.boot.BytesPerSector)
+
+	for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
+		offset := fs.layout.FATOffset +
+			int64(fat)*int64(fs.boot.SectorsPerFAT)*sectorSize +
+			int64(cluster)*4
+
+		sectorOffset := (offset / sectorSize) * sectorSize
+		entryOffset := offset - sectorOffset
+
+		buf := make([]byte, sectorSize)
+
+		if _, err := fs.reader.ReadAt(buf, sectorOffset); err != nil {
+			return fmt.Errorf(
+				"read FAT sector for cluster %d: %w",
+				cluster,
+				err,
+			)
+		}
+
+		oldValue := binary.LittleEndian.Uint32(
+			buf[entryOffset : entryOffset+4],
+		)
+
+		newValue := (oldValue & 0xF0000000) | value
+
+		binary.LittleEndian.PutUint32(
+			buf[entryOffset:entryOffset+4],
+			newValue,
+		)
+
+		if _, err := fs.writer.WriteAt(buf, sectorOffset); err != nil {
+			return fmt.Errorf(
+				"write FAT sector for cluster %d: %w",
+				cluster,
+				err,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) freeClusterChain(start uint32) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	chain, err := fs.readClusterChain(start)
+	if err != nil {
+		return err
+	}
+
+	for _, cluster := range chain {
+		if err := fs.writeFATEntry(cluster, 0); err != nil {
+			return fmt.Errorf(
+				"free cluster %d: %w",
+				cluster,
+				err,
+			)
+		}
+	}
+
+	return nil
+}

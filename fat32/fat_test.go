@@ -3,6 +3,7 @@ package fat32
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -285,5 +286,172 @@ func TestClusterChain(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("chain = %v, want %v", got, want)
+	}
+}
+
+func TestWriteFATEntry(t *testing.T) {
+	data := make([]byte, 10000)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	binary.LittleEndian.PutUint32(
+		data[layout.FATOffset+3*4:],
+		0xF0000005,
+	)
+
+	secondFAT := layout.FATOffset +
+		int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+	binary.LittleEndian.PutUint32(
+		data[secondFAT+3*4:],
+		0xF0000005,
+	)
+
+	reader := bytes.NewReader(data)
+	fs := New(reader)
+	fs.writer = writerAtBuffer{data: data}
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.writeFATEntry(3, 0x12345678); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.readFATEntry(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got != 0x02345678 {
+		t.Fatalf("got FAT value %#x, want %#x", got, uint32(0x02345678))
+	}
+
+	gotSecond := binary.LittleEndian.Uint32(
+		data[secondFAT+3*4:],
+	)
+
+	if gotSecond != 0xF2345678 {
+		t.Fatalf("second FAT = %#x, want %#x", gotSecond, uint32(0xF2345678))
+	}
+}
+
+type writerAtBuffer struct {
+	data []byte
+}
+
+func (w writerAtBuffer) WriteAt(p []byte, off int64) (int, error) {
+	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
+		return 0, io.ErrShortBuffer
+	}
+
+	copy(w.data[off:], p)
+
+	return len(p), nil
+}
+
+func TestFreeClusterChain(t *testing.T) {
+	data := make([]byte, 4096)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	// FAT chain:
+	//
+	// 2 -> 3 -> 4 -> EOF
+	//
+	// Cluster 5 is allocated but is not part of the chain.
+	fatValues := map[uint32]uint32{
+		2: 3,
+		3: 4,
+		4: fat32EOF,
+		5: fat32EOF,
+	}
+
+	for cluster, value := range fatValues {
+		offset := layout.FATOffset + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+
+		secondFAT := layout.FATOffset +
+			int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+		offset = secondFAT + int64(cluster)*4
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			value,
+		)
+	}
+
+	fs := New(bytes.NewReader(data))
+	fs.writer = writerAtBuffer{data: data}
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.freeClusterChain(2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clusters in the chain should now be free.
+	for _, cluster := range []uint32{2, 3, 4} {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !free {
+			t.Fatalf("cluster %d is still allocated", cluster)
+		}
+	}
+
+	// An unrelated allocated cluster must remain allocated.
+	free, err := fs.IsFreeCluster(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatal("cluster 5 was unexpectedly freed")
+	}
+
+	// Verify that the second FAT copy was also updated.
+	secondFAT := layout.FATOffset +
+		int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
+
+	for _, cluster := range []uint32{2, 3, 4} {
+		offset := secondFAT + int64(cluster)*4
+
+		value := binary.LittleEndian.Uint32(
+			data[offset : offset+4],
+		)
+
+		if value != 0 {
+			t.Fatalf(
+				"second FAT cluster %d = %#x, want 0",
+				cluster,
+				value,
+			)
+		}
 	}
 }
