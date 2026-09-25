@@ -206,8 +206,10 @@ func TestDelete(t *testing.T) {
 	// End of directory marker.
 	data[directoryOffset+64] = 0x00
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 
@@ -314,8 +316,10 @@ func TestDeleteShortNameOnlyFile(t *testing.T) {
 	// End of directory marker.
 	data[directoryOffset+32] = 0x00
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 
@@ -404,8 +408,10 @@ func TestDeleteDirectory(t *testing.T) {
 	// End of directory marker.
 	data[directoryOffset+32] = 0x00
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 
@@ -504,8 +510,10 @@ func TestDeleteCorruptClusterChain(t *testing.T) {
 	// End of directory marker.
 	data[directoryOffset+32] = 0x00
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 
@@ -562,8 +570,10 @@ func TestDeleteDirectoryRecordMultipleLFN(t *testing.T) {
 	data[directoryOffset+32] = 0x01
 	data[directoryOffset+64] = 'T'
 
-	fs := New(bytes.NewReader(data))
-	fs.writer = writerAtBuffer{data: data}
+	reader := bytes.NewReader(data)
+	writer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 

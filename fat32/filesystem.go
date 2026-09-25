@@ -102,3 +102,10 @@ func (fs *Filesystem) Delete(path string) error {
 
 	return nil
 }
+
+func NewReadWrite(reader io.ReaderAt, writer io.WriterAt) *Filesystem {
+	return &Filesystem{
+		reader: reader,
+		writer: writer,
+	}
+}
