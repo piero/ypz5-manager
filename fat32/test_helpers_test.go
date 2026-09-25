@@ -25,6 +25,7 @@ type failingWriterAt struct {
 	failAfter    int
 	writes       int
 	partialWrite bool
+	failOnce     bool
 }
 
 func (w *failingWriterAt) WriteAt(p []byte, off int64) (int, error) {
@@ -33,6 +34,10 @@ func (w *failingWriterAt) WriteAt(p []byte, off int64) (int, error) {
 	}
 
 	if w.writes >= w.failAfter {
+		if w.failOnce {
+			w.failAfter = int(^uint(0) >> 1)
+		}
+
 		if w.partialWrite {
 			n := len(p) / 2
 			copy(w.data[off:], p[:n])

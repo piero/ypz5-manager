@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -456,6 +457,7 @@ func TestWriteFATEntryShortWrite(t *testing.T) {
 		data:         data,
 		failAfter:    1,
 		partialWrite: true,
+		failOnce:     true,
 	}
 
 	fs := NewReadWrite(bytes.NewReader(data), writer)
@@ -494,8 +496,77 @@ func TestWriteFATEntryShortWrite(t *testing.T) {
 		data[secondFAT+entryOffset : secondFAT+entryOffset+4],
 	)
 
-	t.Logf("first FAT entry:  %#08x", first)
-	t.Logf("second FAT entry: %#08x", second)
+	if first != 0xF0000000 {
+		t.Fatalf(
+			"first FAT entry: got %#08x, want %#08x",
+			first,
+			0xF0000000,
+		)
+	}
+
+	if second != 0xF0000000 {
+		t.Fatalf(
+			"second FAT entry: got %#08x, want %#08x",
+			second,
+			0xF0000000,
+		)
+	}
+}
+
+func TestWriteFATEntryRollbackFailure(t *testing.T) {
+	const (
+		sectorSize  = 512
+		fatOffset   = 0
+		entryOffset = 300
+	)
+
+	data := make([]byte, 2048)
+
+	binary.LittleEndian.PutUint32(
+		data[entryOffset:entryOffset+4],
+		0xF0000000,
+	)
+
+	secondFAT := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[secondFAT+entryOffset:secondFAT+entryOffset+4],
+		0xF0000000,
+	)
+
+	writer := &failingWriterAt{
+		data:         data,
+		failAfter:    1,
+		partialWrite: true,
+	}
+
+	fs := NewReadWrite(bytes.NewReader(data), writer)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     1,
+		TotalSectors:      100,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
+	}
+
+	err := fs.writeFATEntry(75, 0x12345678)
+	if err == nil {
+		t.Fatal("writeFATEntry unexpectedly succeeded")
+	}
+
+	first := binary.LittleEndian.Uint32(
+		data[entryOffset : entryOffset+4],
+	)
+
+	second := binary.LittleEndian.Uint32(
+		data[secondFAT+entryOffset : secondFAT+entryOffset+4],
+	)
 
 	if first != 0xF2345678 {
 		t.Fatalf(
@@ -511,5 +582,9 @@ func TestWriteFATEntryShortWrite(t *testing.T) {
 			second,
 			0xF0000000,
 		)
+	}
+
+	if !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("error = %q, want rollback failure", err)
 	}
 }

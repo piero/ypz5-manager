@@ -158,6 +158,15 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 
 	sectorSize := int64(fs.boot.BytesPerSector)
 
+	type fatSector struct {
+		offset int64
+		old    []byte
+		new    []byte
+	}
+
+	sectors := make([]fatSector, 0, fs.boot.NumberOfFATs)
+
+	// Prepare all FAT sectors before writing anything.
 	for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
 		offset := fs.layout.FATOffset +
 			int64(fat)*int64(fs.boot.SectorsPerFAT)*sectorSize +
@@ -176,6 +185,8 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 			)
 		}
 
+		old := append([]byte(nil), buf...)
+
 		oldValue := binary.LittleEndian.Uint32(
 			buf[entryOffset : entryOffset+4],
 		)
@@ -187,21 +198,80 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 			newValue,
 		)
 
-		n, err := fs.writer.WriteAt(buf, sectorOffset)
-		if err != nil {
-			return fmt.Errorf(
-				"write FAT sector for cluster %d: %w",
-				cluster,
-				err,
-			)
-		}
+		sectors = append(sectors, fatSector{
+			offset: sectorOffset,
+			old:    old,
+			new:    buf,
+		})
+	}
 
-		if n != len(buf) {
+	// Write each FAT copy. If a later write fails, restore the
+	// copies that were successfully written.
+	for i, sector := range sectors {
+		n, err := fs.writer.WriteAt(sector.new, sector.offset)
+		if err != nil || n != len(sector.new) {
+			rollbackErr := error(nil)
+
+			for j := i - 1; j >= 0; j-- {
+				previous := sectors[j]
+
+				rn, rerr := fs.writer.WriteAt(
+					previous.old,
+					previous.offset,
+				)
+
+				if rerr != nil {
+					rollbackErr = fmt.Errorf(
+						"rollback FAT sector at offset %d: %w",
+						previous.offset,
+						rerr,
+					)
+					break
+				}
+
+				if rn != len(previous.old) {
+					rollbackErr = fmt.Errorf(
+						"rollback FAT sector at offset %d: short write: wrote %d of %d bytes",
+						previous.offset,
+						rn,
+						len(previous.old),
+					)
+					break
+				}
+			}
+
+			if err != nil {
+				if rollbackErr != nil {
+					return fmt.Errorf(
+						"write FAT sector for cluster %d: %w; rollback failed: %v",
+						cluster,
+						err,
+						rollbackErr,
+					)
+				}
+
+				return fmt.Errorf(
+					"write FAT sector for cluster %d: %w",
+					cluster,
+					err,
+				)
+			}
+
+			if rollbackErr != nil {
+				return fmt.Errorf(
+					"short write of FAT sector for cluster %d: wrote %d of %d bytes; rollback failed: %v",
+					cluster,
+					n,
+					len(sector.new),
+					rollbackErr,
+				)
+			}
+
 			return fmt.Errorf(
 				"short write of FAT sector for cluster %d: wrote %d of %d bytes",
 				cluster,
 				n,
-				len(buf),
+				len(sector.new),
 			)
 		}
 	}
