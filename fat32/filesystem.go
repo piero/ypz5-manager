@@ -15,14 +15,29 @@ type Entry struct {
 
 type Filesystem struct {
 	reader io.ReaderAt
+	writer io.WriterAt
 	boot   BootSector
 	layout Layout
 }
 
 func New(reader io.ReaderAt) *Filesystem {
-	return &Filesystem{
+	fs := &Filesystem{
 		reader: reader,
 	}
+
+	if writer, ok := reader.(io.WriterAt); ok {
+		fs.writer = writer
+	}
+
+	return fs
+}
+
+func (fs *Filesystem) writable() error {
+	if fs.writer == nil {
+		return fmt.Errorf("filesystem is read-only")
+	}
+
+	return nil
 }
 
 func (fs *Filesystem) Open() error {

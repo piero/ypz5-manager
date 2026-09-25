@@ -142,5 +142,23 @@ func (fs *Filesystem) FindFreeCluster(start uint32) (uint32, error) {
 }
 
 func (fs *Filesystem) ClusterChain(start uint32) ([]uint32, error) {
-    return fs.readClusterChain(start)
+	return fs.readClusterChain(start)
 }
+
+// func (fs *Filesystem) freeClusterChain(start uint32) error {
+// 	if start < 2 {
+// 		return fmt.Errorf("invalid start cluster: %d", start)
+// 	}
+// 
+// 	chain, err := fs.readClusterChain(start)
+// 	if err != nil {
+// 		return err
+// 	}
+// 
+// 	for _, cluster := range chain {
+// 		// TODO: write zero to the FAT entry.
+// 		_ = cluster
+// 	}
+// 
+// 	return nil
+// }

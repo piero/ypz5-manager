@@ -7,6 +7,7 @@ import (
 	"unicode/utf16"
 )
 
+// what the application sees
 type DirectoryEntry struct {
 	Name         string
 	ShortName    string
@@ -17,6 +18,109 @@ type DirectoryEntry struct {
 	EntryCluster uint32
 	EntryOffset  uint32
 	LFNEntries   uint8
+}
+
+type directoryEntryLocation struct {
+	Cluster uint32
+	Offset  uint32
+}
+
+// how an entry is physically represented on FAT32
+type directoryRecord struct {
+	Entry DirectoryEntry
+	Short directoryEntryLocation
+	LFN   []directoryEntryLocation
+}
+
+func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryRecord, error) {
+	clusters, err := fs.readClusterChain(startCluster)
+	if err != nil {
+		return nil, err
+	}
+
+	var records []directoryRecord
+	var lfn []lfnEntry
+
+	for _, cluster := range clusters {
+		data, err := fs.readCluster(cluster)
+		if err != nil {
+			return nil, err
+		}
+
+		for offset := 0; offset < len(data); offset += 32 {
+			entry := data[offset : offset+32]
+
+			if entry[0] == 0x00 {
+				return records, nil
+			}
+
+			if entry[0] == 0xE5 {
+				lfn = nil
+				continue
+			}
+
+			location := directoryEntryLocation{
+				Cluster: cluster,
+				Offset:  uint32(offset),
+			}
+
+			if entry[0x0B] == 0x0F {
+				name, err := parseLFNEntry(entry)
+				if err != nil {
+					return nil, err
+				}
+
+				name.EntryCluster = cluster
+				name.EntryOffset = uint32(offset)
+
+				lfn = append(lfn, name)
+				continue
+			}
+
+			dirEntry, err := parseDirectoryEntry(entry)
+			if err != nil {
+				return nil, err
+			}
+
+			if len(lfn) > 0 {
+				checksum := shortNameChecksum(entry)
+
+				for _, lfnEntry := range lfn {
+					if lfnEntry.Checksum != checksum {
+						return nil, fmt.Errorf(
+							"LFN checksum mismatch for %q",
+							dirEntry.ShortName,
+						)
+					}
+				}
+
+				dirEntry.Name = combineLFN(lfn)
+				dirEntry.LFNEntries = uint8(len(lfn))
+			} else {
+				dirEntry.Name = dirEntry.ShortName
+			}
+
+			dirEntry.EntryCluster = cluster
+			dirEntry.EntryOffset = uint32(offset)
+
+			record := directoryRecord{
+				Entry: dirEntry,
+				Short: location,
+			}
+
+			for _, lfnEntry := range lfn {
+				record.LFN = append(record.LFN, directoryEntryLocation{
+					Cluster: lfnEntry.EntryCluster,
+					Offset:  lfnEntry.EntryOffset,
+				})
+			}
+
+			records = append(records, record)
+			lfn = nil
+		}
+	}
+
+	return records, nil
 }
 
 func parseShortName(data []byte) string {
@@ -66,6 +170,9 @@ type lfnEntry struct {
 	IsLast   bool
 	Checksum byte
 	Name     string
+
+	EntryCluster uint32
+	EntryOffset  uint32
 }
 
 func parseLFNEntry(data []byte) (lfnEntry, error) {
@@ -128,80 +235,98 @@ func combineLFN(entries []lfnEntry) string {
 	return name
 }
 
+// func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, error) {
+// 	clusters, err := fs.readClusterChain(startCluster)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+//
+// 	var entries []DirectoryEntry
+// 	var lfn []lfnEntry
+//
+// 	for _, cluster := range clusters {
+// 		data, err := fs.readCluster(cluster)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+//
+// 		for offset := 0; offset < len(data); offset += 32 {
+// 			entry := data[offset : offset+32]
+//
+// 			// 0x00 means there are no more directory entries.
+// 			if entry[0] == 0x00 {
+// 				return entries, nil
+// 			}
+//
+// 			// 0xE5 means this entry has been deleted.
+// 			if entry[0] == 0xE5 {
+// 				lfn = nil
+// 				continue
+// 			}
+//
+// 			// Long filename entry.
+// 			if entry[0x0B] == 0x0F {
+// 				name, err := parseLFNEntry(entry)
+// 				if err != nil {
+// 					return nil, err
+// 				}
+//
+// 				name.EntryCluster = cluster
+// 				name.EntryOffset = uint32(offset)
+//
+// 				lfn = append(lfn, name)
+// 				continue
+// 			}
+//
+// 			// Normal directory entry.
+// 			dirEntry, err := parseDirectoryEntry(entry)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+//
+// 			// validate checksum
+// 			if len(lfn) > 0 {
+// 				checksum := shortNameChecksum(entry)
+//
+// 				for _, lfnEntry := range lfn {
+// 					if lfnEntry.Checksum != checksum {
+// 						return nil, fmt.Errorf(
+// 							"LFN checksum mismatch for %q",
+// 							dirEntry.ShortName,
+// 						)
+// 					}
+// 				}
+// 			}
+//
+// 			if len(lfn) > 0 {
+// 				dirEntry.Name = combineLFN(lfn)
+// 				dirEntry.LFNEntries = uint8(len(lfn))
+// 			} else {
+// 				dirEntry.Name = dirEntry.ShortName
+// 			}
+//
+// 			dirEntry.EntryCluster = cluster
+// 			dirEntry.EntryOffset = uint32(offset)
+//
+// 			entries = append(entries, dirEntry)
+//
+// 			lfn = nil
+// 		}
+// 	}
+//
+// 	return entries, nil
+// }
+
 func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, error) {
-	clusters, err := fs.readClusterChain(startCluster)
+	records, err := fs.readDirectoryRecords(startCluster)
 	if err != nil {
 		return nil, err
 	}
 
-	var entries []DirectoryEntry
-	var lfn []lfnEntry
+	entries := make([]DirectoryEntry, 0, len(records))
 
-	for _, cluster := range clusters {
-		data, err := fs.readCluster(cluster)
-		if err != nil {
-			return nil, err
-		}
-
-		for offset := 0; offset < len(data); offset += 32 {
-			entry := data[offset : offset+32]
-
-			// 0x00 means there are no more directory entries.
-			if entry[0] == 0x00 {
-				return entries, nil
-			}
-
-			// 0xE5 means this entry has been deleted.
-			if entry[0] == 0xE5 {
-				lfn = nil
-				continue
-			}
-
-			// Long filename entry.
-			if entry[0x0B] == 0x0F {
-				name, err := parseLFNEntry(entry)
-				if err != nil {
-					return nil, err
-				}
-
-				lfn = append(lfn, name)
-				continue
-			}
-
-			// Normal directory entry.
-			dirEntry, err := parseDirectoryEntry(entry)
-			if err != nil {
-				return nil, err
-			}
-
-			// validate checksum
-			if len(lfn) > 0 {
-				checksum := shortNameChecksum(entry)
-
-				for _, lfnEntry := range lfn {
-					if lfnEntry.Checksum != checksum {
-						return nil, fmt.Errorf(
-							"LFN checksum mismatch for %q",
-							dirEntry.ShortName,
-						)
-					}
-				}
-			}
-
-			if len(lfn) > 0 {
-				dirEntry.Name = combineLFN(lfn)
-				dirEntry.LFNEntries = uint8(len(lfn))
-			} else {
-				dirEntry.Name = dirEntry.ShortName
-			}
-
-			dirEntry.EntryCluster = cluster
-			dirEntry.EntryOffset = uint32(offset)
-
-			entries = append(entries, dirEntry)
-
-			lfn = nil
-		}
+	for _, record := range records {
+		entries = append(entries, record.Entry)
 	}
 
 	return entries, nil
