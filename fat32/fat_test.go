@@ -3,7 +3,6 @@ package fat32
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"reflect"
 	"testing"
 )
@@ -341,20 +340,6 @@ func TestWriteFATEntry(t *testing.T) {
 	}
 }
 
-type writerAtBuffer struct {
-	data []byte
-}
-
-func (w writerAtBuffer) WriteAt(p []byte, off int64) (int, error) {
-	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
-		return 0, io.ErrShortBuffer
-	}
-
-	copy(w.data[off:], p)
-
-	return len(p), nil
-}
-
 func TestFreeClusterChain(t *testing.T) {
 	data := make([]byte, 4096)
 
@@ -450,5 +435,81 @@ func TestFreeClusterChain(t *testing.T) {
 				value,
 			)
 		}
+	}
+}
+
+func TestWriteFATEntryShortWrite(t *testing.T) {
+	const (
+		sectorSize  = 512
+		fatOffset   = 0
+		entryOffset = 300
+	)
+
+	data := make([]byte, 2048)
+
+	binary.LittleEndian.PutUint32(
+		data[entryOffset:entryOffset+4],
+		0xF0000000,
+	)
+
+	writer := &failingWriterAt{
+		data:         data,
+		failAfter:    1,
+		partialWrite: true,
+	}
+
+	fs := NewReadWrite(bytes.NewReader(data), writer)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     1,
+		TotalSectors:      100,
+	}
+
+	fs.layout = Layout{
+		FATOffset: fatOffset,
+	}
+
+	secondFAT := int64(fs.boot.SectorsPerFAT) *
+		int64(fs.boot.BytesPerSector)
+
+	binary.LittleEndian.PutUint32(
+		data[secondFAT+entryOffset:secondFAT+entryOffset+4],
+		0xF0000000,
+	)
+
+	err := fs.writeFATEntry(75, 0x12345678)
+	if err == nil {
+		t.Fatal("writeFATEntry unexpectedly succeeded")
+	}
+
+	first := binary.LittleEndian.Uint32(
+		data[entryOffset : entryOffset+4],
+	)
+
+	second := binary.LittleEndian.Uint32(
+		data[secondFAT+entryOffset : secondFAT+entryOffset+4],
+	)
+
+	t.Logf("first FAT entry:  %#08x", first)
+	t.Logf("second FAT entry: %#08x", second)
+
+	if first != 0xF2345678 {
+		t.Fatalf(
+			"first FAT entry: got %#08x, want %#08x",
+			first,
+			0xF2345678,
+		)
+	}
+
+	if second != 0xF0000000 {
+		t.Fatalf(
+			"second FAT entry: got %#08x, want %#08x",
+			second,
+			0xF0000000,
+		)
 	}
 }

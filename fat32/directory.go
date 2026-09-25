@@ -352,16 +352,13 @@ func shortNameChecksum(data []byte) byte {
 	return checksum
 }
 
+// read whole sector -> change one byte in memory -> write whole sector
 func (fs *Filesystem) markDirectoryEntryDeleted(
 	location directoryEntryLocation,
 ) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
-
-	offset := fs.layout.DataOffset +
-		int64(location.Cluster-2)*fs.layout.BytesPerCluster +
-		int64(location.Offset)
 
 	if location.Offset%32 != 0 {
 		return fmt.Errorf(
@@ -370,14 +367,45 @@ func (fs *Filesystem) markDirectoryEntryDeleted(
 		)
 	}
 
-	data := []byte{0xE5}
+	sectorSize := int64(fs.boot.BytesPerSector)
 
-	if _, err := fs.writer.WriteAt(data, offset); err != nil {
+	offset := fs.layout.DataOffset +
+		int64(location.Cluster-2)*fs.layout.BytesPerCluster +
+		int64(location.Offset)
+
+	sectorOffset := (offset / sectorSize) * sectorSize
+	entryOffset := offset - sectorOffset
+
+	buf := make([]byte, sectorSize)
+
+	if _, err := fs.reader.ReadAt(buf, sectorOffset); err != nil {
 		return fmt.Errorf(
-			"mark directory entry deleted at cluster %d offset %d: %w",
+			"read directory sector at cluster %d offset %d: %w",
 			location.Cluster,
 			location.Offset,
 			err,
+		)
+	}
+
+	buf[entryOffset] = 0xE5
+
+	n, err := fs.writer.WriteAt(buf, sectorOffset)
+	if err != nil {
+		return fmt.Errorf(
+			"write directory sector at cluster %d offset %d: %w",
+			location.Cluster,
+			location.Offset,
+			err,
+		)
+	}
+
+	if n != len(buf) {
+		return fmt.Errorf(
+			"short write of directory sector at cluster %d offset %d: wrote %d of %d bytes",
+			location.Cluster,
+			location.Offset,
+			n,
+			len(buf),
 		)
 	}
 

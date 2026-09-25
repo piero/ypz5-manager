@@ -187,11 +187,21 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 			newValue,
 		)
 
-		if _, err := fs.writer.WriteAt(buf, sectorOffset); err != nil {
+		n, err := fs.writer.WriteAt(buf, sectorOffset)
+		if err != nil {
 			return fmt.Errorf(
 				"write FAT sector for cluster %d: %w",
 				cluster,
 				err,
+			)
+		}
+
+		if n != len(buf) {
+			return fmt.Errorf(
+				"short write of FAT sector for cluster %d: wrote %d of %d bytes",
+				cluster,
+				n,
+				len(buf),
 			)
 		}
 	}

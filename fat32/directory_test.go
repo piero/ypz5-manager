@@ -234,3 +234,110 @@ func TestDeleteDirectoryRecord(t *testing.T) {
 		t.Fatalf("unrelated entry 96 first byte = %#x, want %#x", got, byte(0x42))
 	}
 }
+
+func TestMarkDirectoryEntryDeletedPreservesSector(t *testing.T) {
+	const (
+		dataOffset      = 1024
+		cluster         = 2
+		entryOffset     = 32
+		sectorSize      = 512
+		bytesPerCluster = 512
+	)
+
+	data := make([]byte, 2048)
+
+	// Fill the directory sector with recognizable data.
+	for i := dataOffset; i < dataOffset+sectorSize; i++ {
+		data[i] = byte(i & 0xff)
+	}
+
+	original := append([]byte(nil), data...)
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		&writerAtBuffer{data: data},
+	)
+
+	fs.boot = BootSector{
+		BytesPerSector: sectorSize,
+	}
+
+	fs.layout = Layout{
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerCluster,
+	}
+
+	err := fs.markDirectoryEntryDeleted(directoryEntryLocation{
+		Cluster: cluster,
+		Offset:  entryOffset,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The target byte should now be 0xE5.
+	target := data[dataOffset+entryOffset]
+	if target != 0xE5 {
+		t.Fatalf("target byte = %#x, want %#x", target, byte(0xE5))
+	}
+
+	// Everything else in the sector must be unchanged.
+	for i := 0; i < sectorSize; i++ {
+		if i == entryOffset {
+			continue
+		}
+
+		if data[dataOffset+i] != original[dataOffset+i] {
+			t.Fatalf(
+				"byte at sector offset %d changed: got %#x, want %#x",
+				i,
+				data[dataOffset+i],
+				original[dataOffset+i],
+			)
+		}
+	}
+}
+
+func TestMarkDirectoryEntryDeletedShortWrite(t *testing.T) {
+	const (
+		sectorSize      = 512
+		dataOffset      = 1024
+		bytesPerCluster = 512
+	)
+
+	data := make([]byte, 2048)
+
+	// Make the target directory entry look occupied.
+	data[dataOffset] = 'T'
+
+	writer := &failingWriterAt{
+		data:         data,
+		failAfter:    0,
+		partialWrite: true,
+	}
+
+	fs := NewReadWrite(bytes.NewReader(data), writer)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      16,
+		RootCluster:       2,
+	}
+
+	fs.layout = Layout{
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerCluster,
+	}
+
+	err := fs.markDirectoryEntryDeleted(directoryEntryLocation{
+		Cluster: 2,
+		Offset:  0,
+	})
+	if err == nil {
+		t.Fatal("markDirectoryEntryDeleted unexpectedly succeeded")
+	}
+}

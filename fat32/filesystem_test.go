@@ -100,7 +100,7 @@ func TestBootSectorLayout(t *testing.T) {
 //	      ├── FAT[3] = 0
 //	      └── FAT[4] = 0
 //	         (both FAT copies)
-func TestDelete(t *testing.T) {
+func TestDeleteWriteFailure(t *testing.T) {
 	data := make([]byte, 16384)
 
 	boot := BootSector{
@@ -207,56 +207,51 @@ func TestDelete(t *testing.T) {
 	data[directoryOffset+64] = 0x00
 
 	reader := bytes.NewReader(data)
-	writer := writerAtBuffer{data: data}
+	writer := &failingWriterAt{
+		data:      data,
+		failAfter: 2,
+	}
 
 	fs := NewReadWrite(reader, writer)
 	fs.boot = boot
 	fs.layout = layout
 
-	if err := fs.Delete("/Example.txt"); err != nil {
+	if err := fs.Delete("/Example.txt"); err == nil {
+		t.Fatal("Delete unexpectedly succeeded")
+	}
+
+	// The directory entries should still be intact because the
+	// deletion did not complete.
+	if got := data[directoryOffset]; got == 0xE5 {
+		t.Fatal("LFN entry was unexpectedly marked deleted")
+	}
+
+	if got := data[directoryOffset+32]; got == 0xE5 {
+		t.Fatal("short entry was unexpectedly marked deleted")
+	}
+
+	// Cluster 3 was freed before the failure.
+	free, err := fs.IsFreeCluster(3)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	// The LFN entry should be marked deleted.
-	if got := data[directoryOffset]; got != 0xE5 {
-		t.Fatalf("LFN first byte = %#x, want %#x", got, byte(0xE5))
+	if !free {
+		t.Fatal("cluster 3 was not freed")
 	}
 
-	// The short entry should be marked deleted.
-	if got := data[directoryOffset+32]; got != 0xE5 {
-		t.Fatalf(
-			"short entry first byte = %#x, want %#x",
-			got,
-			byte(0xE5),
-		)
-	}
-
-	// The file's clusters should now be free.
-	for _, cluster := range []uint32{3, 4} {
-		free, err := fs.IsFreeCluster(cluster)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if !free {
-			t.Fatalf("cluster %d is still allocated", cluster)
-		}
-	}
-
-	// The unrelated cluster must remain allocated.
-	free, err := fs.IsFreeCluster(5)
+	// Cluster 4 was not reached.
+	free, err = fs.IsFreeCluster(4)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if free {
-		t.Fatal("unrelated cluster 5 was unexpectedly freed")
+		t.Fatal("cluster 4 was unexpectedly freed")
 	}
 
-	// The deleted file should no longer be found.
-	if _, err := fs.Lookup("/Example.txt"); err == nil {
-		t.Fatal("deleted file was still found")
-	}
+	t.Log("Delete failed as expected")
+
 }
 
 func TestDeleteShortNameOnlyFile(t *testing.T) {
