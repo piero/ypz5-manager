@@ -233,7 +233,7 @@ func TestFindFreeCluster(t *testing.T) {
 		},
 	}
 
-	cluster, err := fs.FindFreeCluster()
+	cluster, err := fs.FindFreeCluster(2)
 	if err != nil {
 		t.Fatal(err)
 	}

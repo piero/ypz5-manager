@@ -122,10 +122,12 @@ func (fs *Filesystem) IsFreeCluster(cluster uint32) (bool, error) {
 	return value == 0, nil
 }
 
-func (fs *Filesystem) FindFreeCluster() (uint32, error) {
-	clusterCount := fs.boot.ClusterCount()
+func (fs *Filesystem) FindFreeCluster(start uint32) (uint32, error) {
+	if start < 2 {
+		start = 2
+	}
 
-	for cluster := uint32(2); cluster < clusterCount+2; cluster++ {
+	for cluster := start; cluster <= fs.boot.MaxCluster(); cluster++ {
 		free, err := fs.IsFreeCluster(cluster)
 		if err != nil {
 			return 0, err

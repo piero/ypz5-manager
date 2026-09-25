@@ -63,3 +63,8 @@ func (b BootSector) Validate() error {
 
 	return nil
 }
+
+// MaxCluster finds the highest valid FAT cluster number
+func (b BootSector) MaxCluster() uint32 {
+	return b.ClusterCount() + 1
+}

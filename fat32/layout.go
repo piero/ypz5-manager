@@ -26,6 +26,7 @@ func (b BootSector) Layout() Layout {
 	}
 }
 
+// ClusterCount finds the number of data clusters
 func (b BootSector) ClusterCount() uint32 {
 	dataSectors := b.TotalSectors -
 		uint32(b.ReservedSectors) -

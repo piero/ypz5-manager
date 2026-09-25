@@ -44,3 +44,7 @@ func (fs *Filesystem) Open() error {
 func (fs *Filesystem) RootCluster() uint32 {
 	return fs.boot.RootCluster
 }
+
+func (fs *Filesystem) BootSector() BootSector {
+	return fs.boot
+}

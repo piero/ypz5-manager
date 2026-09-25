@@ -28,6 +28,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	fmt.Printf("bytes/sector:     %d\n", fs.BootSector().BytesPerSector)
+	fmt.Printf("sectors/cluster:  %d\n", fs.BootSector().SectorsPerCluster)
+	fmt.Printf("total sectors:    %d\n", fs.BootSector().TotalSectors)
+	fmt.Printf("cluster count:    %d\n", fs.BootSector().ClusterCount())
+	fmt.Printf("max cluster:      %d\n", fs.BootSector().MaxCluster())
+
+	freeCluster, err := fs.FindFreeCluster(2)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "find free cluster:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("first free cluster: %d\n", freeCluster)
+
 	fmt.Println("finding /Music...")
 
 	dir, err := fs.Find("/Music")
