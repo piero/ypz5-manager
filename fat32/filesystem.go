@@ -63,3 +63,42 @@ func (fs *Filesystem) RootCluster() uint32 {
 func (fs *Filesystem) BootSector() BootSector {
 	return fs.boot
 }
+
+func (fs *Filesystem) Delete(path string) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	record, err := fs.findDirectoryRecord(path)
+	if err != nil {
+		return err
+	}
+
+	if record.Entry.IsDir {
+		return fmt.Errorf("%q is a directory", path)
+	}
+
+	// Read the complete chain before making any modifications.
+	chain, err := fs.readClusterChain(record.Entry.StartCluster)
+	if err != nil {
+		return err
+	}
+
+	// Mark the directory entries as deleted.
+	if err := fs.deleteDirectoryRecord(record); err != nil {
+		return err
+	}
+
+	// Release the file's clusters.
+	for _, cluster := range chain {
+		if err := fs.writeFATEntry(cluster, 0); err != nil {
+			return fmt.Errorf(
+				"free cluster %d: %w",
+				cluster,
+				err,
+			)
+		}
+	}
+
+	return nil
+}
