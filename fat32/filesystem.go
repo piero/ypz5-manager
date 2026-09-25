@@ -88,9 +88,13 @@ func (fs *Filesystem) Delete(path string) error {
 	}
 
 	// Read the complete chain before making any modifications.
-	chain, err := fs.readClusterChain(record.Entry.StartCluster)
-	if err != nil {
-		return err
+	// A zero-length file has no allocated data clusters.
+	var chain []uint32
+	if record.Entry.StartCluster != 0 {
+		chain, err = fs.readClusterChain(record.Entry.StartCluster)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Mark the directory entries as deleted first.
