@@ -235,88 +235,6 @@ func combineLFN(entries []lfnEntry) string {
 	return name
 }
 
-// func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, error) {
-// 	clusters, err := fs.readClusterChain(startCluster)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-//
-// 	var entries []DirectoryEntry
-// 	var lfn []lfnEntry
-//
-// 	for _, cluster := range clusters {
-// 		data, err := fs.readCluster(cluster)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-//
-// 		for offset := 0; offset < len(data); offset += 32 {
-// 			entry := data[offset : offset+32]
-//
-// 			// 0x00 means there are no more directory entries.
-// 			if entry[0] == 0x00 {
-// 				return entries, nil
-// 			}
-//
-// 			// 0xE5 means this entry has been deleted.
-// 			if entry[0] == 0xE5 {
-// 				lfn = nil
-// 				continue
-// 			}
-//
-// 			// Long filename entry.
-// 			if entry[0x0B] == 0x0F {
-// 				name, err := parseLFNEntry(entry)
-// 				if err != nil {
-// 					return nil, err
-// 				}
-//
-// 				name.EntryCluster = cluster
-// 				name.EntryOffset = uint32(offset)
-//
-// 				lfn = append(lfn, name)
-// 				continue
-// 			}
-//
-// 			// Normal directory entry.
-// 			dirEntry, err := parseDirectoryEntry(entry)
-// 			if err != nil {
-// 				return nil, err
-// 			}
-//
-// 			// validate checksum
-// 			if len(lfn) > 0 {
-// 				checksum := shortNameChecksum(entry)
-//
-// 				for _, lfnEntry := range lfn {
-// 					if lfnEntry.Checksum != checksum {
-// 						return nil, fmt.Errorf(
-// 							"LFN checksum mismatch for %q",
-// 							dirEntry.ShortName,
-// 						)
-// 					}
-// 				}
-// 			}
-//
-// 			if len(lfn) > 0 {
-// 				dirEntry.Name = combineLFN(lfn)
-// 				dirEntry.LFNEntries = uint8(len(lfn))
-// 			} else {
-// 				dirEntry.Name = dirEntry.ShortName
-// 			}
-//
-// 			dirEntry.EntryCluster = cluster
-// 			dirEntry.EntryOffset = uint32(offset)
-//
-// 			entries = append(entries, dirEntry)
-//
-// 			lfn = nil
-// 		}
-// 	}
-//
-// 	return entries, nil
-// }
-
 func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, error) {
 	records, err := fs.readDirectoryRecords(startCluster)
 	if err != nil {
@@ -432,4 +350,56 @@ func shortNameChecksum(data []byte) byte {
 	}
 
 	return checksum
+}
+
+func (fs *Filesystem) markDirectoryEntryDeleted(
+	location directoryEntryLocation,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	offset := fs.layout.DataOffset +
+		int64(location.Cluster-2)*fs.layout.BytesPerCluster +
+		int64(location.Offset)
+
+	if location.Offset%32 != 0 {
+		return fmt.Errorf(
+			"invalid directory entry offset: %d",
+			location.Offset,
+		)
+	}
+
+	data := []byte{0xE5}
+
+	if _, err := fs.writer.WriteAt(data, offset); err != nil {
+		return fmt.Errorf(
+			"mark directory entry deleted at cluster %d offset %d: %w",
+			location.Cluster,
+			location.Offset,
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) deleteDirectoryRecord(
+	record directoryRecord,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	for _, location := range record.LFN {
+		if err := fs.markDirectoryEntryDeleted(location); err != nil {
+			return err
+		}
+	}
+
+	if err := fs.markDirectoryEntryDeleted(record.Short); err != nil {
+		return err
+	}
+
+	return nil
 }

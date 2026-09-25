@@ -1,6 +1,7 @@
 package fat32
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -154,5 +155,80 @@ func TestCombineLFNUsesSequenceOrder(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("Name = %q, want %q", got, want)
+	}
+}
+
+func TestDeleteDirectoryRecord(t *testing.T) {
+	data := make([]byte, 4096)
+
+	boot := BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      2,
+		SectorsPerFAT:     2,
+		TotalSectors:      100,
+		RootCluster:       2,
+	}
+
+	layout := boot.Layout()
+
+	// Directory cluster 2 starts at DataOffset.
+	//
+	//  offset  0: unrelated entry
+	//  offset 32: LFN entry
+	//  offset 64: short entry
+	//  offset 96: unrelated entry
+	directoryOffset := layout.DataOffset
+
+	data[directoryOffset+0] = 0x41
+	data[directoryOffset+32] = 0x41
+	data[directoryOffset+64] = 0x50
+	data[directoryOffset+96] = 0x42
+
+	fs := New(bytes.NewReader(data))
+	fs.writer = writerAtBuffer{data: data}
+	fs.boot = boot
+	fs.layout = layout
+
+	record := directoryRecord{
+		Entry: DirectoryEntry{
+			Name:         "Example Long Name.txt",
+			IsDir:        false,
+			Size:         123,
+			StartCluster: 10,
+		},
+		Short: directoryEntryLocation{
+			Cluster: 2,
+			Offset:  64,
+		},
+		LFN: []directoryEntryLocation{
+			{
+				Cluster: 2,
+				Offset:  32,
+			},
+		},
+	}
+
+	if err := fs.deleteDirectoryRecord(record); err != nil {
+		t.Fatal(err)
+	}
+
+	// The LFN and short entries should be marked deleted.
+	if got := data[directoryOffset+32]; got != 0xE5 {
+		t.Fatalf("LFN entry first byte = %#x, want %#x", got, byte(0xE5))
+	}
+
+	if got := data[directoryOffset+64]; got != 0xE5 {
+		t.Fatalf("short entry first byte = %#x, want %#x", got, byte(0xE5))
+	}
+
+	// Unrelated entries must remain untouched.
+	if got := data[directoryOffset+0]; got != 0x41 {
+		t.Fatalf("unrelated entry 0 first byte = %#x, want %#x", got, byte(0x41))
+	}
+
+	if got := data[directoryOffset+96]; got != 0x42 {
+		t.Fatalf("unrelated entry 96 first byte = %#x, want %#x", got, byte(0x42))
 	}
 }
