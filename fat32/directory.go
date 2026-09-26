@@ -129,82 +129,6 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 	return records, nil
 }
 
-func (fs *Filesystem) findFreeDirectorySlots(
-	startCluster uint32,
-	count int,
-) ([]directoryEntrySlot, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("invalid slot count: %d", count)
-	}
-
-	clusters, err := fs.readClusterChain(startCluster)
-	if err != nil {
-		return nil, err
-	}
-
-	var slots []directoryEntrySlot
-	endOfDirectory := false
-
-	for _, cluster := range clusters {
-		data, err := fs.readCluster(cluster)
-		if err != nil {
-			return nil, err
-		}
-
-		for offset := 0; offset < len(data); offset += 32 {
-			entry := data[offset : offset+32]
-
-			if endOfDirectory {
-				slots = append(slots, directoryEntrySlot{
-					Cluster: cluster,
-					Offset:  uint32(offset),
-				})
-
-				if len(slots) == count {
-					return slots, nil
-				}
-
-				continue
-			}
-
-			if entry[0] == 0x00 {
-				endOfDirectory = true
-
-				slots = append(slots, directoryEntrySlot{
-					Cluster: cluster,
-					Offset:  uint32(offset),
-				})
-
-				if len(slots) == count {
-					return slots, nil
-				}
-
-				continue
-			}
-
-			if entry[0] == 0xE5 {
-				slots = append(slots, directoryEntrySlot{
-					Cluster: cluster,
-					Offset:  uint32(offset),
-				})
-
-				if len(slots) == count {
-					return slots, nil
-				}
-
-				continue
-			}
-
-			slots = nil
-		}
-	}
-
-	return nil, fmt.Errorf(
-		"directory has no run of %d free entries",
-		count,
-	)
-}
-
 func parseShortName(data []byte) string {
 	name := strings.TrimRight(string(data[0:8]), " ")
 	ext := strings.TrimRight(string(data[8:11]), " ")
@@ -276,7 +200,7 @@ func isShortName(name string) bool {
 func generateShortName(name string, n int) ([11]byte, error) {
 	var result [11]byte
 
-	if n < 1 || n > 9 {
+	if n < 1 || n > 9999999 {
 		return result, fmt.Errorf("invalid short-name sequence: %d", n)
 	}
 
@@ -311,6 +235,13 @@ func generateShortName(name string, n int) ([11]byte, error) {
 	suffix := fmt.Sprintf("~%d", n)
 
 	maxPrefix := 8 - len(suffix)
+
+	if maxPrefix < 1 {
+		return result, fmt.Errorf(
+			"short-name sequence is too large: %d",
+			n,
+		)
+	}
 
 	if len(prefix) > maxPrefix {
 		prefix = prefix[:maxPrefix]
@@ -390,11 +321,11 @@ func encodeDirectoryEntry(
 }
 
 type lfnEntry struct {
-	Sequence uint8
-	IsLast   bool
-	Checksum byte
-	Name     string
-
+	Sequence     uint8
+	IsLast       bool
+	Checksum     byte
+	Name         string
+	NameUnits    []uint16
 	EntryCluster uint32
 	EntryOffset  uint32
 }
@@ -407,53 +338,65 @@ type lfnEntry struct {
 //	byte 0x0B: 0x0F
 //	byte 0x0D: short-name checksum
 func parseLFNEntry(data []byte) (lfnEntry, error) {
+	var result lfnEntry
+
 	if len(data) != 32 {
-		return lfnEntry{}, fmt.Errorf(
-			"LFN entry has %d bytes, want 32",
+		return result, fmt.Errorf(
+			"invalid LFN entry length: %d",
 			len(data),
 		)
 	}
 
 	if data[0x0B] != 0x0F {
-		return lfnEntry{}, fmt.Errorf(
-			"not an LFN entry: attributes = %#02x",
+		return result, fmt.Errorf(
+			"invalid LFN entry attribute: 0x%02x",
 			data[0x0B],
 		)
 	}
 
 	sequence := data[0x00]
 
-	var chars []uint16
+	result.Sequence = sequence & 0x1F
+	result.IsLast = sequence&0x40 != 0
+	result.Checksum = data[0x0D]
 
-	// Characters 1–5.
-	for offset := 0x01; offset < 0x0B; offset += 2 {
-		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
+	const (
+		terminator = uint16(0x0000)
+		unused     = uint16(0xFFFF)
+	)
+
+	offsets := [...]int{
+		0x01, 0x03, 0x05, 0x07, 0x09,
+		0x0E, 0x10, 0x12, 0x14, 0x16, 0x18,
+		0x1C, 0x1E,
 	}
 
-	// Characters 6–11.
-	for offset := 0x0E; offset < 0x1A; offset += 2 {
-		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
-	}
+	units := make([]uint16, 0, len(offsets))
 
-	// Characters 12–13.
-	for offset := 0x1C; offset < 0x20; offset += 2 {
-		chars = append(chars, binary.LittleEndian.Uint16(data[offset:offset+2]))
-	}
+	for _, charOffset := range offsets {
+		value := binary.LittleEndian.Uint16(
+			data[charOffset : charOffset+2],
+		)
 
-	// Stop at the UTF-16 terminator.
-	for i, char := range chars {
-		if char == 0x0000 {
-			chars = chars[:i]
+		if value == terminator {
 			break
 		}
+
+		if value == unused {
+			break
+		}
+
+		units = append(units, value)
 	}
 
-	return lfnEntry{
-		Sequence: sequence & 0x3F,
-		IsLast:   sequence&0x40 != 0,
-		Checksum: data[0x0D],
-		Name:     string(utf16.Decode(chars)),
-	}, nil
+	result.NameUnits = units
+
+	// This is retained for compatibility with existing tests/users of
+	// lfnEntry.Name. It is not used to combine LFN entries, because
+	// an individual entry may contain an unpaired surrogate.
+	result.Name = string(utf16.Decode(units))
+
+	return result, nil
 }
 
 func encodeLFNEntry(
@@ -461,66 +404,91 @@ func encodeLFNEntry(
 	name string,
 	checksum byte,
 ) ([32]byte, error) {
-	var data [32]byte
+	units := utf16.Encode([]rune(name))
 
-	chars := utf16.Encode([]rune(name))
-
-	if len(chars) > 13 {
-		return data, fmt.Errorf(
-			"LFN segment is %d UTF-16 code units, want at most 13",
-			len(chars),
+	if len(units) > 13 {
+		return [32]byte{}, fmt.Errorf(
+			"LFN entry name is too long: %d UTF-16 code units",
+			len(units),
 		)
 	}
 
-	data[0x00] = sequence
-	data[0x0B] = 0x0F
-	data[0x0D] = checksum
+	return encodeLFNEntryUnits(sequence, units, checksum)
+}
 
-	charOffsets := []int{
+func encodeLFNEntryUnits(
+	sequence uint8,
+	units []uint16,
+	checksum byte,
+) ([32]byte, error) {
+	var result [32]byte
+
+	if len(units) > 13 {
+		return result, fmt.Errorf(
+			"LFN entry has too many UTF-16 code units: %d",
+			len(units),
+		)
+	}
+
+	result[0x00] = sequence
+	result[0x0B] = 0x0F
+	result[0x0C] = 0x00
+	result[0x0D] = checksum
+	result[0x1A] = 0x00
+	result[0x1B] = 0x00
+
+	const (
+		terminator = uint16(0x0000)
+		unused     = uint16(0xFFFF)
+	)
+
+	offsets := [...]int{
 		0x01, 0x03, 0x05, 0x07, 0x09,
 		0x0E, 0x10, 0x12, 0x14, 0x16, 0x18,
 		0x1C, 0x1E,
 	}
 
-	for i, offset := range charOffsets {
-		value := uint16(0xFFFF)
+	for i, offset := range offsets {
+		value := unused
 
-		if i < len(chars) {
-			value = chars[i]
-		} else if i == len(chars) {
-			value = 0x0000
+		if i < len(units) {
+			value = units[i]
+		} else if i == len(units) {
+			value = terminator
 		}
 
 		binary.LittleEndian.PutUint16(
-			data[offset:offset+2],
+			result[offset:offset+2],
 			value,
 		)
 	}
 
-	return data, nil
+	return result, nil
 }
 
-func encodeLFNEntries(name string, checksum byte) ([][32]byte, error) {
-	chars := utf16.Encode([]rune(name))
+func encodeLFNEntries(
+	name string,
+	checksum byte,
+) ([][32]byte, error) {
+	units := utf16.Encode([]rune(name))
 
-	if len(chars) == 0 {
-		return nil, fmt.Errorf("LFN name is empty")
+	if len(units) == 0 {
+		return nil, fmt.Errorf("empty LFN")
 	}
 
-	const charsPerEntry = 13
+	count := (len(units) + 12) / 13
 
-	count := (len(chars) + charsPerEntry - 1) / charsPerEntry
-	entries := make([][32]byte, 0, count)
+	result := make([][32]byte, 0, count)
 
+	// FAT stores LFN entries in reverse logical order:
+	// the highest sequence number appears first on disk.
 	for i := count - 1; i >= 0; i-- {
-		start := i * charsPerEntry
-		end := start + charsPerEntry
+		start := i * 13
+		end := start + 13
 
-		if end > len(chars) {
-			end = len(chars)
+		if end > len(units) {
+			end = len(units)
 		}
-
-		segment := string(utf16.Decode(chars[start:end]))
 
 		sequence := uint8(i + 1)
 
@@ -528,29 +496,42 @@ func encodeLFNEntries(name string, checksum byte) ([][32]byte, error) {
 			sequence |= 0x40
 		}
 
-		entry, err := encodeLFNEntry(
+		entry, err := encodeLFNEntryUnits(
 			sequence,
-			segment,
+			units[start:end],
 			checksum,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		entries = append(entries, entry)
+		result = append(result, entry)
 	}
 
-	return entries, nil
+	return result, nil
 }
 
 func combineLFN(entries []lfnEntry) string {
-	var name string
-
-	for i := len(entries) - 1; i >= 0; i-- {
-		name += entries[i].Name
+	if len(entries) == 0 {
+		return ""
 	}
 
-	return name
+	var units []uint16
+
+	// LFN entries are stored on disk in reverse logical order.
+	// Reassemble their UTF-16 code units before decoding them.
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].NameUnits != nil {
+			units = append(units, entries[i].NameUnits...)
+			continue
+		}
+
+		// Fallback for lfnEntry values constructed directly by older
+		// tests/code rather than by parseLFNEntry.
+		units = append(units, utf16.Encode([]rune(entries[i].Name))...)
+	}
+
+	return string(utf16.Decode(units))
 }
 
 func (fs *Filesystem) readDirectory(startCluster uint32) ([]DirectoryEntry, error) {
@@ -939,47 +920,6 @@ func (fs *Filesystem) writeEncodedDirectoryRecord(
 	return nil
 }
 
-func (fs *Filesystem) createDirectoryRecord(
-	directoryCluster uint32,
-	name string,
-	startCluster uint32,
-	size uint32,
-) error {
-	if err := fs.writable(); err != nil {
-		return err
-	}
-
-	shortName, err := fs.generateUniqueShortName(
-		directoryCluster,
-		name,
-	)
-	if err != nil {
-		return err
-	}
-
-	record, err := encodeDirectoryRecordWithShortName(
-		name,
-		shortName,
-		startCluster,
-		size,
-	)
-	if err != nil {
-		return err
-	}
-
-	slotCount := len(record.LFN) + 1
-
-	slots, err := fs.findFreeDirectorySlots(
-		directoryCluster,
-		slotCount,
-	)
-	if err != nil {
-		return err
-	}
-
-	return fs.writeEncodedDirectoryRecord(record, slots)
-}
-
 // splitFilePath splits a file path into its parent directory and filename.
 func splitFilePath(path string) (string, string, error) {
 	path = strings.TrimSpace(path)
@@ -1113,7 +1053,7 @@ func (fs *Filesystem) generateUniqueShortName(
 		return encodeShortName(name)
 	}
 
-	for n := 1; n <= 9; n++ {
+	for n := 1; n <= 9999999; n++ {
 		shortName, err := generateShortName(name, n)
 		if err != nil {
 			return [11]byte{}, err

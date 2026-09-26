@@ -579,6 +579,16 @@ func TestGenerateShortName(t *testing.T) {
 			n:    2,
 			want: "SOMEFI~2.MP3",
 		},
+		{
+			name: "Some file.mp3",
+			n:    10,
+			want: "SOMEF~10.MP3",
+		},
+		{
+			name: "Some file.mp3",
+			n:    999,
+			want: "SOME~999.MP3",
+		},
 	}
 
 	for _, tt := range tests {

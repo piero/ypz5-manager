@@ -245,13 +245,16 @@ func (fs *Filesystem) ClusterChain(start uint32) ([]uint32, error) {
 	return fs.readClusterChain(start)
 }
 
-func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
+func (fs *Filesystem) writeFATEntry(
+	cluster uint32,
+	value uint32,
+) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
 
 	if cluster < 2 || cluster > fs.boot.MaxCluster() {
-		return fmt.Errorf("invalid cluster: %d", cluster)
+		return fmt.Errorf("invalid FAT cluster: %d", cluster)
 	}
 
 	value &= 0x0FFFFFFF
@@ -308,9 +311,13 @@ func (fs *Filesystem) writeFATEntry(cluster uint32, value uint32) error {
 	// Write each FAT copy. If a later write fails, restore the
 	// copies that were successfully written.
 	for i, sector := range sectors {
-		n, err := fs.writer.WriteAt(sector.new, sector.offset)
+		n, err := fs.writer.WriteAt(
+			sector.new,
+			sector.offset,
+		)
+
 		if err != nil || n != len(sector.new) {
-			rollbackErr := error(nil)
+			var rollbackErr error
 
 			for j := i - 1; j >= 0; j-- {
 				previous := sectors[j]

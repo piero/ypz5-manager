@@ -21,6 +21,16 @@ type Filesystem struct {
 	layout Layout
 }
 
+var errDirectoryFull = errors.New("directory is full")
+
+var errDirectoryNoContiguousSlots = errors.New(
+	"directory has no contiguous free slots",
+)
+
+var errDirectoryEndReached = errors.New(
+	"directory end reached before enough contiguous slots were found",
+)
+
 // read-only
 func New(reader io.ReaderAt) *Filesystem {
 	fs := &Filesystem{
@@ -202,4 +212,277 @@ func (fs *Filesystem) WriteFile(path string, data []byte) error {
 	}
 
 	return nil
+}
+
+func (fs *Filesystem) findFreeDirectorySlots(
+	startCluster uint32,
+	count int,
+) ([]directoryEntrySlot, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("invalid slot count: %d", count)
+	}
+
+	clusters, err := fs.readClusterChain(startCluster)
+	if err != nil {
+		return nil, err
+	}
+
+	var slots []directoryEntrySlot
+	endOfDirectory := false
+	foundFree := false
+
+	for _, cluster := range clusters {
+		data, err := fs.readCluster(cluster)
+		if err != nil {
+			return nil, err
+		}
+
+		for offset := 0; offset < len(data); offset += 32 {
+			entry := data[offset : offset+32]
+
+			if endOfDirectory {
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			if entry[0] == 0x00 {
+				endOfDirectory = true
+				foundFree = true
+
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			if entry[0] == 0xE5 {
+				foundFree = true
+
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			slots = nil
+		}
+	}
+
+	if endOfDirectory {
+		return nil, fmt.Errorf(
+			"%w: need %d contiguous entries",
+			errDirectoryEndReached,
+			count,
+		)
+	}
+
+	if foundFree {
+		return nil, fmt.Errorf(
+			"%w: directory has no run of %d free entries",
+			errDirectoryNoContiguousSlots,
+			count,
+		)
+	}
+
+	return nil, fmt.Errorf(
+		"%w: need %d entries",
+		errDirectoryFull,
+		count,
+	)
+}
+
+func (fs *Filesystem) expandDirectory(
+	directoryCluster uint32,
+	clusterCount int,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	if clusterCount <= 0 {
+		return fmt.Errorf(
+			"invalid directory expansion cluster count: %d",
+			clusterCount,
+		)
+	}
+
+	clusters, err := fs.readClusterChain(directoryCluster)
+	if err != nil {
+		return err
+	}
+
+	if len(clusters) == 0 {
+		return fmt.Errorf("directory cluster chain is empty")
+	}
+
+	lastCluster := clusters[len(clusters)-1]
+
+	newChain, err := fs.allocateClusterChain(clusterCount)
+	if err != nil {
+		return err
+	}
+
+	// Link the existing directory chain to the new clusters.
+	if err := fs.writeFATEntry(lastCluster, newChain[0]); err != nil {
+		if rollbackErr := fs.freeClusterChain(newChain[0]); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+
+		return err
+	}
+
+	// The clusters returned by allocateClusterChain are already
+	// linked together. Initialize every new directory cluster.
+	for _, cluster := range newChain {
+		data := make([]byte, fs.layout.BytesPerCluster)
+
+		if err := fs.writeCluster(cluster, data); err != nil {
+			// Restore the old directory chain.
+			rollbackErr := fs.writeFATEntry(
+				lastCluster,
+				fat32EOF,
+			)
+
+			freeErr := fs.freeClusterChain(newChain[0])
+
+			return errors.Join(
+				err,
+				rollbackErr,
+				freeErr,
+			)
+		}
+	}
+
+	return nil
+}
+
+// createDirectoryRecord behaviour:
+// directory completely full
+//
+//	│
+//	└── expand
+//
+// directory has 0x00 but insufficient slots before cluster end
+//
+//	│
+//	└── expand
+//
+// directory has scattered deleted slots, no 0x00
+//
+//	│
+//	└── return errDirectoryNoContiguousSlots
+func (fs *Filesystem) createDirectoryRecord(
+	directoryCluster uint32,
+	name string,
+	startCluster uint32,
+	size uint32,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	shortName, err := fs.generateUniqueShortName(
+		directoryCluster,
+		name,
+	)
+	if err != nil {
+		return err
+	}
+
+	record, err := encodeDirectoryRecordWithShortName(
+		name,
+		shortName,
+		startCluster,
+		size,
+	)
+	if err != nil {
+		return err
+	}
+
+	slotCount := len(record.LFN) + 1
+
+	/*
+		slots, err := fs.findFreeDirectorySlots(
+			directoryCluster,
+			slotCount,
+		)
+		if err != nil {
+			if !errors.Is(err, errDirectoryFull) {
+				return err
+			}
+
+			entriesPerCluster := int(fs.layout.BytesPerCluster / 32)
+
+			clustersNeeded := (slotCount + entriesPerCluster - 1) /
+				entriesPerCluster
+
+			if err := fs.expandDirectory(
+				directoryCluster,
+				clustersNeeded,
+			); err != nil {
+				return err
+			}
+
+			slots, err = fs.findFreeDirectorySlots(
+				directoryCluster,
+				slotCount,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	*/
+
+	slots, err := fs.findFreeDirectorySlots(
+		directoryCluster,
+		slotCount,
+	)
+	if err != nil {
+		if !errors.Is(err, errDirectoryFull) &&
+			!errors.Is(err, errDirectoryEndReached) {
+			return err
+		}
+
+		entriesPerCluster := int(fs.layout.BytesPerCluster / 32)
+
+		clustersNeeded := (slotCount + entriesPerCluster - 1) /
+			entriesPerCluster
+
+		if err := fs.expandDirectory(
+			directoryCluster,
+			clustersNeeded,
+		); err != nil {
+			return err
+		}
+
+		slots, err = fs.findFreeDirectorySlots(
+			directoryCluster,
+			slotCount,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return fs.writeEncodedDirectoryRecord(record, slots)
 }
