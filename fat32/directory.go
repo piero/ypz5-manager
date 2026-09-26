@@ -1069,3 +1069,21 @@ func (fs *Filesystem) findDirectoryEntry(
 
 	return nil, nil
 }
+
+func (fs *Filesystem) shortNameExists(
+	directoryCluster uint32,
+	shortName string,
+) (bool, error) {
+	records, err := fs.readDirectoryRecords(directoryCluster)
+	if err != nil {
+		return false, err
+	}
+
+	for _, record := range records {
+		if strings.EqualFold(record.Entry.ShortName, shortName) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}

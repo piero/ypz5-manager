@@ -1865,3 +1865,83 @@ func TestFindDirectoryEntry(t *testing.T) {
 		t.Fatal("expected nil for missing entry")
 	}
 }
+
+func TestShortNameExists(t *testing.T) {
+	const (
+		sectorSize       = 512
+		bytesPerCluster  = 512
+		fatOffset        = 0
+		dataOffset       = 512
+		directoryCluster = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+directoryCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      2,
+			RootCluster:       directoryCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	record, err := encodeDirectoryRecord(
+		"Some long filename.txt",
+		123,
+		456,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slots, err := fs.findFreeDirectorySlots(
+		directoryCluster,
+		len(record.LFN)+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.writeEncodedDirectoryRecord(record, slots); err != nil {
+		t.Fatal(err)
+	}
+
+	exists, err := fs.shortNameExists(
+		directoryCluster,
+		recordShortName(record),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !exists {
+		t.Fatal("expected short name to exist")
+	}
+
+	exists, err = fs.shortNameExists(
+		directoryCluster,
+		"OTHER~1.TXT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if exists {
+		t.Fatal("unexpected short-name collision")
+	}
+}
