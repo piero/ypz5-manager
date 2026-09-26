@@ -2,6 +2,7 @@ package fat32
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -139,6 +140,105 @@ func (fs *Filesystem) FindFreeCluster(start uint32) (uint32, error) {
 	}
 
 	return 0, fmt.Errorf("no free clusters")
+}
+
+func (fs *Filesystem) allocateCluster() (uint32, error) {
+	if err := fs.writable(); err != nil {
+		return 0, err
+	}
+
+	cluster, err := fs.FindFreeCluster(2)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := fs.writeFATEntry(cluster, fat32EOF); err != nil {
+		return 0, fmt.Errorf(
+			"allocate cluster %d: %w",
+			cluster,
+			err,
+		)
+	}
+
+	return cluster, nil
+}
+
+// Intended behavior:
+//
+// - count <= 0 → error
+// - allocate count clusters
+// - link each cluster to the next
+// - terminate the last cluster with EOF
+// - on failure, free any clusters allocated by this operation
+// - return the chain only on success
+func (fs *Filesystem) allocateClusterChain(count int) ([]uint32, error) {
+	if err := fs.writable(); err != nil {
+		return nil, err
+	}
+
+	if count <= 0 {
+		return nil, fmt.Errorf("invalid cluster count: %d", count)
+	}
+
+	chain := make([]uint32, 0, count)
+
+	rollback := func() error {
+		var rollbackErr error
+
+		for _, allocated := range chain {
+			if err := fs.writeFATEntry(allocated, 0); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf(
+					"rollback cluster %d: %w",
+					allocated,
+					err,
+				))
+			}
+		}
+
+		return rollbackErr
+	}
+
+	for i := 0; i < count; i++ {
+		cluster, err := fs.allocateCluster()
+
+		// allocation failure: rollback
+		if err != nil {
+			rollbackErr := rollback()
+
+			return nil, errors.Join(
+				fmt.Errorf(
+					"allocate cluster %d of %d: %w",
+					i+1,
+					count,
+					err,
+				),
+				rollbackErr,
+			)
+		}
+
+		chain = append(chain, cluster)
+	}
+
+	// Link the allocated clusters together.
+	for i := 0; i < len(chain)-1; i++ {
+
+		// link error: rollback
+		if err := fs.writeFATEntry(chain[i], chain[i+1]); err != nil {
+			rollbackErr := rollback()
+
+			return nil, errors.Join(
+				fmt.Errorf(
+					"link cluster %d to %d: %w",
+					chain[i],
+					chain[i+1],
+					err,
+				),
+				rollbackErr,
+			)
+		}
+	}
+
+	return chain, nil
 }
 
 func (fs *Filesystem) ClusterChain(start uint32) ([]uint32, error) {
