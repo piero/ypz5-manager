@@ -1923,7 +1923,7 @@ func TestShortNameExists(t *testing.T) {
 
 	exists, err := fs.shortNameExists(
 		directoryCluster,
-		recordShortName(record),
+		parseShortName(record.Short[:]),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1943,5 +1943,85 @@ func TestShortNameExists(t *testing.T) {
 
 	if exists {
 		t.Fatal("unexpected short-name collision")
+	}
+}
+
+func TestGenerateUniqueShortName(t *testing.T) {
+	const (
+		sectorSize       = 512
+		bytesPerCluster  = 512
+		fatOffset        = 0
+		dataOffset       = 512
+		directoryCluster = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+directoryCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      2,
+			RootCluster:       directoryCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	first, err := fs.generateUniqueShortName(
+		directoryCluster,
+		"Some long filename.txt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := parseShortName(first[:]); got != "SOMELO~1.TXT" {
+		t.Fatalf("got %q, want %q", got, "SOMELO~1.TXT")
+	}
+
+	record := encodedDirectoryRecord{
+		Short: encodeDirectoryEntry(
+			first,
+			0x20,
+			123,
+			456,
+		),
+	}
+
+	slots, err := fs.findFreeDirectorySlots(
+		directoryCluster,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.writeEncodedDirectoryRecord(record, slots); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := fs.generateUniqueShortName(
+		directoryCluster,
+		"Some long filename.txt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := parseShortName(second[:]); got != "SOMELO~2.TXT" {
+		t.Fatalf("got %q, want %q", got, "SOMELO~2.TXT")
 	}
 }

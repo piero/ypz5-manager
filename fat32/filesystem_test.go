@@ -3,6 +3,9 @@ package fat32
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 )
 
@@ -1280,3 +1283,832 @@ func TestWriteFileRollsBackWhenDirectoryIsFull(t *testing.T) {
 		)
 	}
 }
+
+func TestWriteFileLongNameCollision(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+5*bytesPerCluster)
+
+	// Root directory.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      6,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	firstName := "Some long filename.txt"
+	secondName := "Some long file-name.txt"
+
+	if err := fs.WriteFile(firstName, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(secondName, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := fs.findDirectoryEntry(rootCluster, firstName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := fs.findDirectoryEntry(rootCluster, secondName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first == nil {
+		t.Fatalf("file %q was not found", firstName)
+	}
+
+	if second == nil {
+		t.Fatalf("file %q was not found", secondName)
+	}
+
+	if strings.EqualFold(
+		first.Entry.ShortName,
+		second.Entry.ShortName,
+	) {
+		t.Fatalf(
+			"short-name collision: both use %q",
+			first.Entry.ShortName,
+		)
+	}
+
+	if first.Entry.ShortName != "SOMELO~1.TXT" {
+		t.Fatalf(
+			"first short name = %q, want %q",
+			first.Entry.ShortName,
+			"SOMELO~1.TXT",
+		)
+	}
+
+	if second.Entry.ShortName != "SOMELO~2.TXT" {
+		t.Fatalf(
+			"second short name = %q, want %q",
+			second.Entry.ShortName,
+			"SOMELO~2.TXT",
+		)
+	}
+}
+
+func TestWriteFileDuplicateShortName(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+3*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	if err := fs.WriteFile("/test.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fs.WriteFile("/TEST.TXT", []byte("second"))
+	if err == nil {
+		t.Fatal("expected duplicate filename to be rejected")
+	}
+
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWriteFileShortNameCollidesWithLongName(t *testing.T) {
+	// 1. Create Some long filename.txt → gets SOMELO~1.TXT.
+	// 2. Try to create a file whose actual 8.3 name is SOMELO~1.TXT.
+	// 3. It must be rejected, because the short directory name is already occupied.
+
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+4*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      5,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	longName := "Some long filename.txt"
+	shortName := "SOMELO~1.TXT"
+
+	if err := fs.WriteFile(longName, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fs.WriteFile(shortName, []byte("second"))
+	if err == nil {
+		t.Fatal("expected short-name collision to be rejected")
+	}
+
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGenerateUniqueShortNameAvoidsExistingShortName(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+3*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	// Occupy the first generated alias.
+	if err := fs.WriteFile("SOMELO~1.TXT", []byte("existing")); err != nil {
+		t.Fatal(err)
+	}
+
+	shortName, err := fs.generateUniqueShortName(
+		rootCluster,
+		"Some long filename.txt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := parseShortName(shortName[:])
+	want := "SOMELO~2.TXT"
+
+	if got != want {
+		t.Fatalf("short name = %q, want %q", got, want)
+	}
+}
+
+func TestWriteFileLongNameRequiresContiguousDirectorySlots(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+4*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      5,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	// Fill the entire directory with occupied entries, except
+	// for the first slot. A long filename requires two contiguous
+	// slots (LFN + short entry), so the single free slot is not enough.
+	root := make([]byte, bytesPerCluster)
+
+	for offset := 0; offset < bytesPerCluster; offset += 32 {
+		root[offset] = 0x20 // occupied entry
+		root[offset+0x0B] = 0x20
+	}
+
+	root[0] = 0xE5 // single deleted/free entry
+
+	if err := fs.writeCluster(rootCluster, root); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fs.WriteFile(
+		"Some long filename.txt",
+		[]byte("data"),
+	)
+	if err == nil {
+		t.Fatal("expected directory slot allocation to fail")
+	}
+
+	if !strings.Contains(err.Error(), "no run of 3 free entries") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The file data allocation must have been rolled back.
+	free, err := fs.IsFreeCluster(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatal("expected allocated data cluster to be rolled back")
+	}
+}
+
+func TestWriteFileLongNameAcrossDirectoryClusterBoundary(t *testing.T) {
+	// Test writing a long filename whose LFN record crosses a directory-cluster boundary
+
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+		secondCluster   = uint32(3)
+	)
+
+	data := make([]byte, dataOffset+5*bytesPerCluster)
+
+	// Root directory spans clusters 2 -> 3.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		secondCluster,
+	)
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+secondCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      6,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	// Fill all but the final directory entry of cluster 2.
+	// The LFN record will therefore start at the final slot
+	// of cluster 2 and continue into cluster 3.
+	first := make([]byte, bytesPerCluster)
+
+	for offset := 0; offset < bytesPerCluster-32; offset += 32 {
+		first[offset] = 0x20
+		first[offset+0x0B] = 0x20
+	}
+
+	if err := fs.writeCluster(rootCluster, first); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the first slot of cluster 3 available and mark the
+	// following entries as occupied so there are exactly enough
+	// contiguous slots across the cluster boundary.
+	second := make([]byte, bytesPerCluster)
+
+	for offset := 0; offset < bytesPerCluster; offset += 32 {
+		second[offset] = 0x20
+		second[offset+0x0B] = 0x20
+	}
+
+	if err := fs.writeCluster(secondCluster, second); err != nil {
+		t.Fatal(err)
+	}
+
+	// We need three entries for this name:
+	//   LFN + LFN + short entry.
+	//
+	// Make the final slot of cluster 2 and first two slots of
+	// cluster 3 free.
+	first[bytesPerCluster-32] = 0xE5
+	if err := fs.writeCluster(rootCluster, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second[0] = 0xE5
+	second[32] = 0xE5
+	if err := fs.writeCluster(secondCluster, second); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "Some long filename.txt"
+	content := []byte("hello across clusters")
+
+	if err := fs.WriteFile("/"+name, content); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatalf("file %q was not found", name)
+	}
+
+	if record.Entry.Name != name {
+		t.Fatalf(
+			"filename = %q, want %q",
+			record.Entry.Name,
+			name,
+		)
+	}
+
+	if record.Entry.Size != uint32(len(content)) {
+		t.Fatalf(
+			"size = %d, want %d",
+			record.Entry.Size,
+			len(content),
+		)
+	}
+
+	if record.Short.Cluster != secondCluster ||
+		record.Short.Offset != 32 {
+		t.Fatalf(
+			"short entry location = cluster %d offset %d, want cluster %d offset %d",
+			record.Short.Cluster,
+			record.Short.Offset,
+			secondCluster,
+			32,
+		)
+	}
+
+	got, err := (&File{
+		entry: record.Entry,
+		fs:    fs,
+	}).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatalf("file content = %q, want %q", got, content)
+	}
+}
+
+type failOnClusterWriteAt struct {
+	data       []byte
+	failOffset int64
+}
+
+func (w *failOnClusterWriteAt) WriteAt(p []byte, off int64) (int, error) {
+	if off == int64(w.failOffset) {
+		return 0, errors.New("injected directory write failure")
+	}
+
+	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
+		return 0, io.ErrShortBuffer
+	}
+
+	copy(w.data[off:off+int64(len(p))], p)
+	return len(p), nil
+}
+
+func TestWriteFileRollsBackWhenDirectoryWriteFails(t *testing.T) {
+	// Test that a directory-write failure doesn't leave the newly allocated file cluster orphaned.
+
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+		dataCluster     = uint32(3)
+	)
+
+	data := make([]byte, dataOffset+4*bytesPerCluster)
+
+	// Root directory cluster is allocated.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	// Data cluster 3 is initially free.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+dataCluster*4:],
+		0,
+	)
+
+	writer := &failOnClusterWriteAt{
+		data: append([]byte(nil), data...),
+
+		// Fail when the root directory cluster is written.
+		failOffset: int64(dataOffset + int(rootCluster-2)*bytesPerCluster),
+	}
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: writer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			ReservedSectors:   0,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      5,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	name := "hello.txt"
+	content := []byte("hello")
+
+	err := fs.WriteFile(name, content)
+	if err == nil {
+		t.Fatal("expected directory write to fail")
+	}
+
+	if !strings.Contains(err.Error(), "injected directory write failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The newly allocated data cluster must have been freed.
+	gotFAT, err := fs.readFATEntry(dataCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotFAT != 0 {
+		t.Fatalf(
+			"data cluster %d still allocated with FAT value %#x",
+			dataCluster,
+			gotFAT,
+		)
+	}
+
+	// The directory entry must not have been created.
+	record, err := fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record != nil {
+		t.Fatalf("file %q exists after failed write", name)
+	}
+}
+
+type failOnWriteCountAt struct {
+	data       []byte
+	failOffset int64
+	failCount  int
+	writes     int
+}
+
+func (w *failOnWriteCountAt) WriteAt(p []byte, off int64) (int, error) {
+	if off == w.failOffset {
+		w.writes++
+
+		if w.writes == w.failCount {
+			return 0, errors.New("injected FAT rollback failure")
+		}
+	}
+
+	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
+		return 0, io.ErrShortBuffer
+	}
+
+	copy(w.data[off:off+int64(len(p))], p)
+	return len(p), nil
+}
+
+type failDirectoryAndFATRollbackBuffer struct {
+	data []byte
+
+	directoryOffset int64
+	fatOffset       int64
+
+	failDirectoryWrite bool
+	failFATWriteCount  int
+	fatWrites          int
+}
+
+func (b *failDirectoryAndFATRollbackBuffer) ReadAt(
+	p []byte,
+	off int64,
+) (int, error) {
+	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
+		return 0, io.EOF
+	}
+
+	copy(p, b.data[off:off+int64(len(p))])
+	return len(p), nil
+}
+
+func (b *failDirectoryAndFATRollbackBuffer) WriteAt(
+	p []byte,
+	off int64,
+) (int, error) {
+	if off == b.directoryOffset && b.failDirectoryWrite {
+		return 0, errors.New("injected directory write failure")
+	}
+
+	if off == b.fatOffset {
+		b.fatWrites++
+
+		if b.failFATWriteCount > 0 &&
+			b.fatWrites == b.failFATWriteCount {
+			return 0, errors.New("injected FAT rollback failure")
+		}
+	}
+
+	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
+		return 0, io.ErrShortBuffer
+	}
+
+	copy(b.data[off:off+int64(len(p))], p)
+	return len(p), nil
+}
+
+func TestWriteFileReportsRollbackFailure(t *testing.T) {
+	const (
+		bytesPerSector    = 512
+		sectorsPerCluster = 1
+		reservedSectors   = 1
+		numberOfFATs      = 2
+		sectorsPerFAT     = 1
+		rootCluster       = 2
+	)
+
+	fatOffset := int64(reservedSectors * bytesPerSector)
+	dataOffset := int64(
+		(reservedSectors +
+			numberOfFATs*sectorsPerFAT) * bytesPerSector,
+	)
+
+	data := make([]byte, 8*bytesPerSector)
+
+	// Mark the root directory cluster as end-of-chain in both FATs.
+	for fat := 0; fat < numberOfFATs; fat++ {
+		offset := fatOffset +
+			int64(fat*sectorsPerFAT*bytesPerSector) +
+			int64(rootCluster*4)
+
+		binary.LittleEndian.PutUint32(
+			data[offset:offset+4],
+			fat32EOF,
+		)
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerSector * sectorsPerCluster,
+	}
+
+	boot := BootSector{
+		BytesPerSector:    bytesPerSector,
+		SectorsPerCluster: sectorsPerCluster,
+		ReservedSectors:   reservedSectors,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      uint32(len(data) / bytesPerSector),
+		RootCluster:       rootCluster,
+	}
+
+	buffer := &failDirectoryAndFATRollbackBuffer{
+		data:               data,
+		directoryOffset:    dataOffset,
+		fatOffset:          fatOffset,
+		failDirectoryWrite: true,
+		failFATWriteCount:  2,
+	}
+
+	fs := &Filesystem{
+		reader: buffer,
+		writer: buffer,
+		layout: layout,
+		boot:   boot,
+	}
+
+	err := fs.WriteFile("/hello.txt", []byte("hello"))
+	if err == nil {
+		t.Fatal("expected WriteFile to fail")
+	}
+
+	if !strings.Contains(err.Error(), "injected directory write failure") {
+		t.Fatalf("missing directory write error: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "injected FAT rollback failure") {
+		t.Fatalf("missing rollback error: %v", err)
+	}
+
+	value, err := fs.readFATEntry(3)
+	if err != nil {
+		t.Fatalf("read FAT entry: %v", err)
+	}
+
+	if value == 0 {
+		t.Fatal("expected cluster 3 to remain allocated after rollback failure")
+	}
+}
+
+func TestWriteFileReportsPartialChainRollbackFailure(t *testing.T) {
+	// Makes the file span two clusters
+	// Fails the directory write
+	// then fails while freeing the second cluster during rollback
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+		dataCluster1    = uint32(3)
+		dataCluster2    = uint32(4)
+	)
+
+	buffer := &failDirectoryAndFATRollbackBuffer{
+		data: make([]byte, dataOffset+5*bytesPerCluster),
+
+		directoryOffset: int64(dataOffset),
+		fatOffset:       int64(fatOffset),
+	}
+
+	// Root directory cluster is allocated.
+	binary.LittleEndian.PutUint32(
+		buffer.data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	// Data clusters 3 and 4 are initially free.
+	binary.LittleEndian.PutUint32(
+		buffer.data[fatOffset+dataCluster1*4:],
+		0,
+	)
+	binary.LittleEndian.PutUint32(
+		buffer.data[fatOffset+dataCluster2*4:],
+		0,
+	)
+
+	// We need a writer that:
+	//   1. allows the two FAT writes used to allocate clusters 3 and 4;
+	//   2. fails the directory write;
+	//   3. allows the first rollback FAT write;
+	//   4. fails the second rollback FAT write.
+	buffer.failDirectoryWrite = true
+	buffer.failFATWriteCount = 5
+
+	fs := &Filesystem{
+		reader: buffer,
+		writer: buffer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			ReservedSectors:   0,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      6,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	content := make([]byte, bytesPerCluster+1)
+
+	err := fs.WriteFile("hello.txt", content)
+	if err == nil {
+		t.Fatal("expected WriteFile to fail")
+	}
+
+	if !strings.Contains(
+		err.Error(),
+		"injected directory write failure",
+	) {
+		t.Fatalf("missing directory write error: %v", err)
+	}
+
+	if !strings.Contains(
+		err.Error(),
+		"injected FAT rollback failure",
+	) {
+		t.Fatalf("missing rollback error: %v", err)
+	}
+
+	// The first cluster should have been freed before the second
+	// rollback write failed.
+	cluster1FAT, err := fs.readFATEntry(dataCluster1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cluster1FAT != 0 {
+		t.Fatalf(
+			"cluster %d FAT entry = %#x, want 0",
+			dataCluster1,
+			cluster1FAT,
+		)
+	}
+}
+

@@ -949,14 +949,30 @@ func (fs *Filesystem) createDirectoryRecord(
 		return err
 	}
 
-	record, err := encodeDirectoryRecord(name, startCluster, size)
+	shortName, err := fs.generateUniqueShortName(
+		directoryCluster,
+		name,
+	)
+	if err != nil {
+		return err
+	}
+
+	record, err := encodeDirectoryRecordWithShortName(
+		name,
+		shortName,
+		startCluster,
+		size,
+	)
 	if err != nil {
 		return err
 	}
 
 	slotCount := len(record.LFN) + 1
 
-	slots, err := fs.findFreeDirectorySlots(directoryCluster, slotCount)
+	slots, err := fs.findFreeDirectorySlots(
+		directoryCluster,
+		slotCount,
+	)
 	if err != nil {
 		return err
 	}
@@ -1062,7 +1078,8 @@ func (fs *Filesystem) findDirectoryEntry(
 	}
 
 	for i := range records {
-		if strings.EqualFold(records[i].Entry.Name, name) {
+		if strings.EqualFold(records[i].Entry.Name, name) ||
+			strings.EqualFold(records[i].Entry.ShortName, name) {
 			return &records[i], nil
 		}
 	}
@@ -1086,4 +1103,68 @@ func (fs *Filesystem) shortNameExists(
 	}
 
 	return false, nil
+}
+
+func (fs *Filesystem) generateUniqueShortName(
+	directoryCluster uint32,
+	name string,
+) ([11]byte, error) {
+	if isShortName(name) {
+		return encodeShortName(name)
+	}
+
+	for n := 1; n <= 9; n++ {
+		shortName, err := generateShortName(name, n)
+		if err != nil {
+			return [11]byte{}, err
+		}
+
+		exists, err := fs.shortNameExists(
+			directoryCluster,
+			parseShortName(shortName[:]),
+		)
+		if err != nil {
+			return [11]byte{}, err
+		}
+
+		if !exists {
+			return shortName, nil
+		}
+	}
+
+	return [11]byte{}, fmt.Errorf(
+		"unable to generate unique short name for %q",
+		name,
+	)
+}
+
+func encodeDirectoryRecordWithShortName(
+	name string,
+	shortName [11]byte,
+	startCluster uint32,
+	size uint32,
+) (encodedDirectoryRecord, error) {
+	var result encodedDirectoryRecord
+
+	shortEntry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		startCluster,
+		size,
+	)
+
+	result.Short = shortEntry
+
+	if !isShortName(name) {
+		checksum := shortNameChecksum(shortEntry[:])
+
+		lfnEntries, err := encodeLFNEntries(name, checksum)
+		if err != nil {
+			return result, err
+		}
+
+		result.LFN = lfnEntries
+	}
+
+	return result, nil
 }
