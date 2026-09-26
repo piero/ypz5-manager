@@ -341,3 +341,157 @@ func TestMarkDirectoryEntryDeletedShortWrite(t *testing.T) {
 		t.Fatal("markDirectoryEntryDeleted unexpectedly succeeded")
 	}
 }
+
+func TestEncodeShortName(t *testing.T) {
+	got, err := encodeShortName("TEST.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := [11]byte{
+		'T', 'E', 'S', 'T', ' ', ' ', ' ', ' ',
+		'T', 'X', 'T',
+	}
+
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{name: "TEST.TXT"},
+		{name: "README"},
+		{name: "A.B"},
+		{name: "TOOLONGNAME.TXT", wantErr: true},
+		{name: "TEST.TOOLONG", wantErr: true},
+		{name: "BAD NAME.TXT", wantErr: true},
+		{name: "BAD/NAME.TXT", wantErr: true},
+		{name: ".TXT", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := encodeShortName(tt.name)
+
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+
+			if !tt.wantErr && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestEncodeDirectoryEntry(t *testing.T) {
+	shortName, err := encodeShortName("TEST.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := encodeDirectoryEntry(
+		shortName,
+		0x20, // archive
+		1234,
+		5678,
+	)
+
+	entry, err := parseDirectoryEntry(data[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry.ShortName != "TEST.TXT" {
+		t.Fatalf("short name = %q, want %q", entry.ShortName, "TEST.TXT")
+	}
+
+	if entry.IsDir {
+		t.Fatal("entry unexpectedly marked as directory")
+	}
+
+	if entry.StartCluster != 1234 {
+		t.Fatalf("start cluster = %d, want %d", entry.StartCluster, 1234)
+	}
+
+	if entry.Size != 5678 {
+		t.Fatalf("size = %d, want %d", entry.Size, 5678)
+	}
+}
+
+func TestEncodeLFNEntry(t *testing.T) {
+	data, err := encodeLFNEntry(0x41, "Hello", 0xAB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := parseLFNEntry(data[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry.Sequence != 1 {
+		t.Fatalf("sequence = %d, want %d", entry.Sequence, 1)
+	}
+
+	if !entry.IsLast {
+		t.Fatal("entry should be marked as last")
+	}
+
+	if entry.Checksum != 0xAB {
+		t.Fatalf("checksum = %#02x, want %#02x", entry.Checksum, 0xAB)
+	}
+
+	if entry.Name != "Hello" {
+		t.Fatalf("name = %q, want %q", entry.Name, "Hello")
+	}
+}
+
+func TestEncodeLFNEntries(t *testing.T) {
+	name := "This is a long filename"
+
+	entries, err := encodeLFNEntries(name, 0xAB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	first, err := parseLFNEntry(entries[0][:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := parseLFNEntry(entries[1][:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first.Sequence != 2 || !first.IsLast {
+		t.Fatalf(
+			"first entry: sequence=%d isLast=%v, want sequence=2 isLast=true",
+			first.Sequence,
+			first.IsLast,
+		)
+	}
+
+	if second.Sequence != 1 || second.IsLast {
+		t.Fatalf(
+			"second entry: sequence=%d isLast=%v, want sequence=1 isLast=false",
+			second.Sequence,
+			second.IsLast,
+		)
+	}
+
+	if first.Checksum != 0xAB || second.Checksum != 0xAB {
+		t.Fatal("unexpected LFN checksum")
+	}
+
+	if got := combineLFN([]lfnEntry{first, second}); got != name {
+		t.Fatalf("combined name = %q, want %q", got, name)
+	}
+}

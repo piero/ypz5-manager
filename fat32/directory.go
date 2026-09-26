@@ -134,6 +134,54 @@ func parseShortName(data []byte) string {
 	return name + "." + ext
 }
 
+func encodeShortName(name string) ([11]byte, error) {
+	var result [11]byte
+
+	parts := strings.SplitN(name, ".", 2)
+
+	if len(parts[0]) == 0 || len(parts[0]) > 8 {
+		return result, fmt.Errorf("invalid short name: %q", name)
+	}
+
+	if len(parts) == 2 && (len(parts[1]) == 0 || len(parts[1]) > 3) {
+		return result, fmt.Errorf("invalid short name: %q", name)
+	}
+
+	for _, part := range parts {
+		for i := 0; i < len(part); i++ {
+			c := part[i]
+
+			if c < 0x21 || c > 0x7E {
+				return result, fmt.Errorf(
+					"invalid character %#02x in short name %q",
+					c,
+					name,
+				)
+			}
+
+			if strings.ContainsRune(`"*/:<>?\|+=[ ]`, rune(c)) {
+				return result, fmt.Errorf(
+					"invalid character %q in short name %q",
+					c,
+					name,
+				)
+			}
+		}
+	}
+
+	for i := range result {
+		result[i] = ' '
+	}
+
+	copy(result[0:8], strings.ToUpper(parts[0]))
+
+	if len(parts) == 2 {
+		copy(result[8:11], strings.ToUpper(parts[1]))
+	}
+
+	return result, nil
+}
+
 func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 	if len(data) != 32 {
 		return DirectoryEntry{}, fmt.Errorf(
@@ -165,6 +213,36 @@ func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 	}, nil
 }
 
+func encodeDirectoryEntry(
+	shortName [11]byte,
+	attr byte,
+	startCluster uint32,
+	size uint32,
+) [32]byte {
+	var data [32]byte
+
+	copy(data[0:11], shortName[:])
+
+	data[0x0B] = attr
+
+	binary.LittleEndian.PutUint16(
+		data[0x14:0x16],
+		uint16(startCluster>>16),
+	)
+
+	binary.LittleEndian.PutUint16(
+		data[0x1A:0x1C],
+		uint16(startCluster),
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[0x1C:0x20],
+		size,
+	)
+
+	return data
+}
+
 type lfnEntry struct {
 	Sequence uint8
 	IsLast   bool
@@ -175,6 +253,13 @@ type lfnEntry struct {
 	EntryOffset  uint32
 }
 
+// The 13 UTF-16 characters are laid out as:
+//
+//	bytes 1–10: characters 1–5
+//	bytes 14–25: characters 6–11
+//	bytes 28–31: characters 12–13
+//	byte 0x0B: 0x0F
+//	byte 0x0D: short-name checksum
 func parseLFNEntry(data []byte) (lfnEntry, error) {
 	if len(data) != 32 {
 		return lfnEntry{}, fmt.Errorf(
@@ -223,6 +308,93 @@ func parseLFNEntry(data []byte) (lfnEntry, error) {
 		Checksum: data[0x0D],
 		Name:     string(utf16.Decode(chars)),
 	}, nil
+}
+
+func encodeLFNEntry(
+	sequence uint8,
+	name string,
+	checksum byte,
+) ([32]byte, error) {
+	var data [32]byte
+
+	chars := utf16.Encode([]rune(name))
+
+	if len(chars) > 13 {
+		return data, fmt.Errorf(
+			"LFN segment is %d UTF-16 code units, want at most 13",
+			len(chars),
+		)
+	}
+
+	data[0x00] = sequence
+	data[0x0B] = 0x0F
+	data[0x0D] = checksum
+
+	charOffsets := []int{
+		0x01, 0x03, 0x05, 0x07, 0x09,
+		0x0E, 0x10, 0x12, 0x14, 0x16, 0x18,
+		0x1C, 0x1E,
+	}
+
+	for i, offset := range charOffsets {
+		value := uint16(0xFFFF)
+
+		if i < len(chars) {
+			value = chars[i]
+		} else if i == len(chars) {
+			value = 0x0000
+		}
+
+		binary.LittleEndian.PutUint16(
+			data[offset:offset+2],
+			value,
+		)
+	}
+
+	return data, nil
+}
+
+func encodeLFNEntries(name string, checksum byte) ([][32]byte, error) {
+	chars := utf16.Encode([]rune(name))
+
+	if len(chars) == 0 {
+		return nil, fmt.Errorf("LFN name is empty")
+	}
+
+	const charsPerEntry = 13
+
+	count := (len(chars) + charsPerEntry - 1) / charsPerEntry
+	entries := make([][32]byte, 0, count)
+
+	for i := count - 1; i >= 0; i-- {
+		start := i * charsPerEntry
+		end := start + charsPerEntry
+
+		if end > len(chars) {
+			end = len(chars)
+		}
+
+		segment := string(utf16.Decode(chars[start:end]))
+
+		sequence := uint8(i + 1)
+
+		if i == count-1 {
+			sequence |= 0x40
+		}
+
+		entry, err := encodeLFNEntry(
+			sequence,
+			segment,
+			checksum,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }
 
 func combineLFN(entries []lfnEntry) string {

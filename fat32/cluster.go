@@ -33,3 +33,44 @@ func (fs *Filesystem) readCluster(cluster uint32) ([]byte, error) {
 func (fs *Filesystem) ReadRootCluster() ([]byte, error) {
 	return fs.readCluster(fs.boot.RootCluster)
 }
+
+func (fs *Filesystem) writeCluster(cluster uint32, data []byte) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	if cluster < 2 || cluster > fs.boot.MaxCluster() {
+		return fmt.Errorf("invalid cluster: %d", cluster)
+	}
+
+	if int64(len(data)) != fs.layout.BytesPerCluster {
+		return fmt.Errorf(
+			"invalid cluster data size: got %d, want %d",
+			len(data),
+			fs.layout.BytesPerCluster,
+		)
+	}
+
+	offset := fs.layout.DataOffset +
+		int64(cluster-2)*fs.layout.BytesPerCluster
+
+	n, err := fs.writer.WriteAt(data, offset)
+	if err != nil {
+		return fmt.Errorf(
+			"write cluster %d: %w",
+			cluster,
+			err,
+		)
+	}
+
+	if n != len(data) {
+		return fmt.Errorf(
+			"short write of cluster %d: wrote %d of %d bytes",
+			cluster,
+			n,
+			len(data),
+		)
+	}
+
+	return nil
+}
