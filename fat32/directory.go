@@ -938,3 +938,134 @@ func (fs *Filesystem) writeEncodedDirectoryRecord(
 
 	return nil
 }
+
+func (fs *Filesystem) createDirectoryRecord(
+	directoryCluster uint32,
+	name string,
+	startCluster uint32,
+	size uint32,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	record, err := encodeDirectoryRecord(name, startCluster, size)
+	if err != nil {
+		return err
+	}
+
+	slotCount := len(record.LFN) + 1
+
+	slots, err := fs.findFreeDirectorySlots(directoryCluster, slotCount)
+	if err != nil {
+		return err
+	}
+
+	return fs.writeEncodedDirectoryRecord(record, slots)
+}
+
+// splitFilePath splits a file path into its parent directory and filename.
+func splitFilePath(path string) (string, string, error) {
+	path = strings.TrimSpace(path)
+
+	if path == "" {
+		return "", "", fmt.Errorf("empty path")
+	}
+
+	path = strings.TrimSuffix(path, "/")
+
+	if path == "" {
+		return "", "", fmt.Errorf("invalid file path")
+	}
+
+	index := strings.LastIndex(path, "/")
+
+	if index < 0 {
+		return ".", path, nil
+	}
+
+	parent := path[:index]
+	name := path[index+1:]
+
+	if parent == "" {
+		parent = "/"
+	}
+
+	if name == "" {
+		return "", "", fmt.Errorf("path has no filename: %q", path)
+	}
+
+	return parent, name, nil
+}
+
+// findDirectoryCluster resolves the parent directory cluster from a path.
+func (fs *Filesystem) findDirectoryCluster(path string) (uint32, error) {
+	if path == "" || path == "." || path == "/" {
+		return fs.boot.RootCluster, nil
+	}
+
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return fs.boot.RootCluster, nil
+	}
+
+	currentCluster := fs.boot.RootCluster
+
+	for _, component := range strings.Split(path, "/") {
+		if component == "" || component == "." {
+			continue
+		}
+
+		records, err := fs.readDirectoryRecords(currentCluster)
+		if err != nil {
+			return 0, err
+		}
+
+		var found *DirectoryEntry
+
+		for i := range records {
+			entry := &records[i].Entry
+
+			if strings.EqualFold(entry.Name, component) {
+				found = entry
+				break
+			}
+		}
+
+		if found == nil {
+			return 0, fmt.Errorf(
+				"directory %q not found",
+				component,
+			)
+		}
+
+		if !found.IsDir {
+			return 0, fmt.Errorf(
+				"%q is not a directory",
+				component,
+			)
+		}
+
+		currentCluster = found.StartCluster
+	}
+
+	return currentCluster, nil
+}
+
+func (fs *Filesystem) findDirectoryEntry(
+	directoryCluster uint32,
+	name string,
+) (*directoryRecord, error) {
+	records, err := fs.readDirectoryRecords(directoryCluster)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range records {
+		if strings.EqualFold(records[i].Entry.Name, name) {
+			return &records[i], nil
+		}
+	}
+
+	return nil, nil
+}

@@ -1483,3 +1483,385 @@ func TestFindFreeDirectorySlotsAfterEndOfDirectory(t *testing.T) {
 		)
 	}
 }
+
+func TestCreateDirectoryRecord(t *testing.T) {
+	const (
+		sectorSize       = 512
+		bytesPerCluster  = 512
+		fatOffset        = 0
+		dataOffset       = 512
+		directoryCluster = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+bytesPerCluster)
+
+	// Directory cluster 2 is terminated immediately.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+directoryCluster*4:],
+		fat32EOF,
+	)
+	data[dataOffset] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      2,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	const (
+		name         = "Cartoni animati"
+		startCluster = uint32(123)
+		size         = uint32(456)
+	)
+
+	if err := fs.createDirectoryRecord(
+		directoryCluster,
+		name,
+		startCluster,
+		size,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := fs.readDirectoryRecords(directoryCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+
+	record := records[0]
+
+	if record.Entry.Name != name {
+		t.Fatalf("got name %q, want %q", record.Entry.Name, name)
+	}
+
+	if record.Entry.StartCluster != startCluster {
+		t.Fatalf(
+			"got start cluster %d, want %d",
+			record.Entry.StartCluster,
+			startCluster,
+		)
+	}
+
+	if record.Entry.Size != size {
+		t.Fatalf(
+			"got size %d, want %d",
+			record.Entry.Size,
+			size,
+		)
+	}
+
+	if record.Entry.LFNEntries != 2 {
+		t.Fatalf(
+			"got %d LFN entries, want 2",
+			record.Entry.LFNEntries,
+		)
+	}
+
+	if record.Short.Offset != 64 {
+		t.Fatalf(
+			"short entry offset = %d, want 64",
+			record.Short.Offset,
+		)
+
+	}
+}
+
+func TestSplitFilePath(t *testing.T) {
+	tests := []struct {
+		path   string
+		parent string
+		name   string
+	}{
+		{
+			path:   "/Music/Pollon.mp3",
+			parent: "/Music",
+			name:   "Pollon.mp3",
+		},
+		{
+			path:   "/Music/Cartoni animati/New Song.mp3",
+			parent: "/Music/Cartoni animati",
+			name:   "New Song.mp3",
+		},
+		{
+			path:   "Pollon.mp3",
+			parent: ".",
+			name:   "Pollon.mp3",
+		},
+		{
+			path:   "/Pollon.mp3",
+			parent: "/",
+			name:   "Pollon.mp3",
+		},
+	}
+
+	for _, test := range tests {
+		parent, name, err := splitFilePath(test.path)
+		if err != nil {
+			t.Fatalf("%q: %v", test.path, err)
+		}
+
+		if parent != test.parent {
+			t.Fatalf(
+				"%q: parent = %q, want %q",
+				test.path,
+				parent,
+				test.parent,
+			)
+		}
+
+		if name != test.name {
+			t.Fatalf(
+				"%q: name = %q, want %q",
+				test.path,
+				name,
+				test.name,
+			)
+		}
+	}
+}
+
+// Test a two-level directory path:
+//
+//	root (cluster 2)
+//	└── Music (cluster 3)
+//	    └── Cartoni animati (cluster 4)
+func TestFindDirectoryCluster(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+
+		rootCluster    = uint32(2)
+		musicCluster   = uint32(3)
+		cartoniCluster = uint32(4)
+	)
+
+	data := make([]byte, dataOffset+3*bytesPerCluster)
+
+	// Directory chain:
+	// root (2) -> EOF
+	// Music (3) -> EOF
+	// Cartoni animati (4) -> EOF
+	for _, cluster := range []uint32{
+		rootCluster,
+		musicCluster,
+		cartoniCluster,
+	} {
+		binary.LittleEndian.PutUint32(
+			data[fatOffset+cluster*4:],
+			fat32EOF,
+		)
+	}
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	// Write directory entries directly into the fixture.
+	rootRecord, err := encodeDirectoryRecord(
+		"Music",
+		musicCluster,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	musicSlots, err := fs.findFreeDirectorySlots(
+		rootCluster,
+		len(rootRecord.LFN)+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fs.writer = &writerAtBuffer{data: data}
+
+	if err := fs.writeEncodedDirectoryRecord(rootRecord, musicSlots); err != nil {
+		t.Fatal(err)
+	}
+
+	rootData, err := fs.readCluster(rootCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootData[musicSlots[len(musicSlots)-1].Offset+0x0B] = 0x10
+
+	if err := fs.writeCluster(rootCluster, rootData); err != nil {
+		t.Fatal(err)
+	}
+
+	musicRecord, err := encodeDirectoryRecord(
+		"Cartoni animati",
+		cartoniCluster,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	musicSlots2, err := fs.findFreeDirectorySlots(
+		musicCluster,
+		len(musicRecord.LFN)+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.writeEncodedDirectoryRecord(musicRecord, musicSlots2); err != nil {
+		t.Fatal(err)
+	}
+
+	musicData, err := fs.readCluster(musicCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	musicData[musicSlots2[len(musicSlots2)-1].Offset+0x0B] = 0x10
+
+	if err := fs.writeCluster(musicCluster, musicData); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		path string
+		want uint32
+	}{
+		{path: "/", want: rootCluster},
+		{path: ".", want: rootCluster},
+		{path: "/Music", want: musicCluster},
+		{
+			path: "/Music/Cartoni animati",
+			want: cartoniCluster,
+		},
+	}
+
+	for _, test := range tests {
+		got, err := fs.findDirectoryCluster(test.path)
+		if err != nil {
+			t.Fatalf("%q: %v", test.path, err)
+		}
+
+		if got != test.want {
+			t.Fatalf(
+				"%q: got cluster %d, want %d",
+				test.path,
+				got,
+				test.want,
+			)
+		}
+	}
+}
+
+func TestFindDirectoryEntry(t *testing.T) {
+	const (
+		sectorSize       = 512
+		bytesPerCluster  = 512
+		fatOffset        = 0
+		dataOffset       = 512
+		directoryCluster = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+directoryCluster*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      2,
+			RootCluster:       directoryCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	record, err := encodeDirectoryRecord(
+		"Test File.txt",
+		123,
+		42,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slots, err := fs.findFreeDirectorySlots(
+		directoryCluster,
+		len(record.LFN)+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.writeEncodedDirectoryRecord(record, slots); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := fs.findDirectoryEntry(directoryCluster, "test file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if found == nil {
+		t.Fatal("expected directory entry, got nil")
+	}
+
+	if found.Entry.Name != "Test File.txt" {
+		t.Fatalf(
+			"got name %q, want %q",
+			found.Entry.Name,
+			"Test File.txt",
+		)
+	}
+
+	found, err = fs.findDirectoryEntry(
+		directoryCluster,
+		"does-not-exist.txt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if found != nil {
+		t.Fatal("expected nil for missing entry")
+	}
+}

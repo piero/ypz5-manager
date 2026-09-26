@@ -1,6 +1,7 @@
 package fat32
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -112,6 +113,92 @@ func (fs *Filesystem) Delete(path string) error {
 				err,
 			)
 		}
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) writeNewFileData(data []byte) ([]uint32, error) {
+	if err := fs.writable(); err != nil {
+		return nil, err
+	}
+
+	clusterCount := fs.clustersForSize(len(data))
+	if clusterCount == 0 {
+		return nil, nil
+	}
+
+	chain, err := fs.allocateClusterChain(clusterCount)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := fs.writeFileData(chain, data); err != nil {
+		if rollbackErr := fs.freeClusterChain(chain[0]); rollbackErr != nil {
+			return nil, errors.Join(err, rollbackErr)
+		}
+
+		return nil, err
+	}
+
+	return chain, nil
+}
+
+// WriteFile writes a file into the given path.
+//
+// 1. validate path
+// 2. resolve parent
+// 3. check duplicate
+// 4. allocate + write file data
+// 5. create directory entry
+// 6. if directory creation fails → free allocated chain
+func (fs *Filesystem) WriteFile(path string, data []byte) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	parentPath, name, err := splitFilePath(path)
+	if err != nil {
+		return err
+	}
+
+	parentCluster, err := fs.findDirectoryCluster(parentPath)
+	if err != nil {
+		return err
+	}
+
+	existing, err := fs.findDirectoryEntry(parentCluster, name)
+	if err != nil {
+		return err
+	}
+
+	if existing != nil {
+		return fmt.Errorf("file %q already exists", path)
+	}
+
+	chain, err := fs.writeNewFileData(data)
+	if err != nil {
+		return err
+	}
+
+	var startCluster uint32
+	if len(chain) > 0 {
+		startCluster = chain[0]
+	}
+
+	if err := fs.createDirectoryRecord(
+		parentCluster,
+		name,
+		startCluster,
+		uint32(len(data)),
+	); err != nil {
+		if len(chain) > 0 {
+			if rollbackErr := fs.freeClusterChain(chain[0]); rollbackErr != nil {
+				return errors.Join(err, rollbackErr)
+			}
+		}
+
+		return err
 	}
 
 	return nil
