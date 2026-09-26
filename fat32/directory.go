@@ -2,6 +2,7 @@ package fat32
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf16"
@@ -30,6 +31,11 @@ type directoryRecord struct {
 	Entry DirectoryEntry
 	Short directoryEntryLocation
 	LFN   []directoryEntryLocation
+}
+
+type directoryEntrySlot struct {
+	Cluster uint32
+	Offset  uint32
 }
 
 func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryRecord, error) {
@@ -123,6 +129,82 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 	return records, nil
 }
 
+func (fs *Filesystem) findFreeDirectorySlots(
+	startCluster uint32,
+	count int,
+) ([]directoryEntrySlot, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("invalid slot count: %d", count)
+	}
+
+	clusters, err := fs.readClusterChain(startCluster)
+	if err != nil {
+		return nil, err
+	}
+
+	var slots []directoryEntrySlot
+	endOfDirectory := false
+
+	for _, cluster := range clusters {
+		data, err := fs.readCluster(cluster)
+		if err != nil {
+			return nil, err
+		}
+
+		for offset := 0; offset < len(data); offset += 32 {
+			entry := data[offset : offset+32]
+
+			if endOfDirectory {
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			if entry[0] == 0x00 {
+				endOfDirectory = true
+
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			if entry[0] == 0xE5 {
+				slots = append(slots, directoryEntrySlot{
+					Cluster: cluster,
+					Offset:  uint32(offset),
+				})
+
+				if len(slots) == count {
+					return slots, nil
+				}
+
+				continue
+			}
+
+			slots = nil
+		}
+	}
+
+	return nil, fmt.Errorf(
+		"directory has no run of %d free entries",
+		count,
+	)
+}
+
 func parseShortName(data []byte) string {
 	name := strings.TrimRight(string(data[0:8]), " ")
 	ext := strings.TrimRight(string(data[8:11]), " ")
@@ -178,6 +260,70 @@ func encodeShortName(name string) ([11]byte, error) {
 	if len(parts) == 2 {
 		copy(result[8:11], strings.ToUpper(parts[1]))
 	}
+
+	return result, nil
+}
+
+func isShortName(name string) bool {
+	encoded, err := encodeShortName(name)
+	if err != nil {
+		return false
+	}
+
+	return parseShortName(encoded[:]) == strings.ToUpper(name)
+}
+
+func generateShortName(name string, n int) ([11]byte, error) {
+	var result [11]byte
+
+	if n < 1 || n > 9 {
+		return result, fmt.Errorf("invalid short-name sequence: %d", n)
+	}
+
+	parts := strings.SplitN(name, ".", 2)
+
+	base := parts[0]
+	ext := ""
+
+	if len(parts) == 2 {
+		ext = parts[1]
+	}
+
+	var prefix string
+
+	for i := 0; i < len(base); i++ {
+		c := base[i]
+
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+
+		if c >= 'A' && c <= 'Z' ||
+			c >= '0' && c <= '9' {
+			prefix += string(c)
+		}
+	}
+
+	if prefix == "" {
+		prefix = "FILE"
+	}
+
+	suffix := fmt.Sprintf("~%d", n)
+
+	maxPrefix := 8 - len(suffix)
+
+	if len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
+	}
+
+	shortName := prefix + suffix
+
+	if len(ext) > 3 {
+		ext = ext[:3]
+	}
+
+	copy(result[0:8], []byte(fmt.Sprintf("%-8s", shortName)))
+	copy(result[8:11], []byte(fmt.Sprintf("%-3s", strings.ToUpper(ext))))
 
 	return result, nil
 }
@@ -599,6 +745,195 @@ func (fs *Filesystem) deleteDirectoryRecord(
 
 	if err := fs.markDirectoryEntryDeleted(record.Short); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+type encodedDirectoryRecord struct {
+	LFN   [][32]byte
+	Short [32]byte
+}
+
+func encodeDirectoryRecord(
+	name string,
+	startCluster uint32,
+	size uint32,
+) (encodedDirectoryRecord, error) {
+	var result encodedDirectoryRecord
+
+	var shortName [11]byte
+
+	if isShortName(name) {
+		var err error
+
+		shortName, err = encodeShortName(name)
+		if err != nil {
+			return result, err
+		}
+	} else {
+		var err error
+
+		shortName, err = generateShortName(name, 1)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	shortEntry := encodeDirectoryEntry(
+		shortName,
+		0x20, // archive
+		startCluster,
+		size,
+	)
+
+	result.Short = shortEntry
+
+	if !isShortName(name) {
+		checksum := shortNameChecksum(shortEntry[:])
+
+		lfnEntries, err := encodeLFNEntries(name, checksum)
+		if err != nil {
+			return result, err
+		}
+
+		result.LFN = lfnEntries
+	}
+
+	return result, nil
+}
+
+func (fs *Filesystem) writeDirectoryEntry(
+	location directoryEntryLocation,
+	data [32]byte,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	if location.Offset%32 != 0 {
+		return fmt.Errorf("invalid directory entry offset: %d", location.Offset)
+	}
+
+	clusterData, err := fs.readCluster(location.Cluster)
+	if err != nil {
+		return err
+	}
+
+	if int(location.Offset)+32 > len(clusterData) {
+		return fmt.Errorf(
+			"directory entry offset %d is outside cluster %d",
+			location.Offset,
+			location.Cluster,
+		)
+	}
+
+	copy(clusterData[location.Offset:location.Offset+32], data[:])
+
+	return fs.writeCluster(location.Cluster, clusterData)
+}
+
+// Validate all slots first.
+// Read and save the affected clusters.
+// Perform the writes.
+// If any write fails, restore the original cluster contents.
+func (fs *Filesystem) writeEncodedDirectoryRecord(
+	record encodedDirectoryRecord,
+	slots []directoryEntrySlot,
+) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	required := len(record.LFN) + 1
+	if len(slots) != required {
+		return fmt.Errorf(
+			"directory record requires %d slots, got %d",
+			required,
+			len(slots),
+		)
+	}
+
+	for i := 1; i < len(slots); i++ {
+		prev := slots[i-1]
+		curr := slots[i]
+
+		if curr.Cluster == prev.Cluster {
+			if curr.Offset != prev.Offset+32 {
+				return fmt.Errorf(
+					"directory slots are not contiguous at index %d",
+					i,
+				)
+			}
+			continue
+		}
+
+		if prev.Offset != uint32(fs.layout.BytesPerCluster-32) ||
+			curr.Offset != 0 {
+			return fmt.Errorf(
+				"directory slots are not contiguous at index %d",
+				i,
+			)
+		}
+
+		nextCluster, err := fs.readFATEntry(prev.Cluster)
+		if err != nil {
+			return err
+		}
+
+		if nextCluster != curr.Cluster {
+			return fmt.Errorf(
+				"directory slots are not contiguous at index %d",
+				i,
+			)
+		}
+	}
+
+	originalClusters := make(map[uint32][]byte)
+
+	for _, slot := range slots {
+		if _, exists := originalClusters[slot.Cluster]; exists {
+			continue
+		}
+
+		data, err := fs.readCluster(slot.Cluster)
+		if err != nil {
+			return err
+		}
+
+		originalClusters[slot.Cluster] = data
+	}
+
+	restore := func() error {
+		var restoreErr error
+
+		for cluster, data := range originalClusters {
+			if err := fs.writeCluster(cluster, data); err != nil {
+				restoreErr = errors.Join(restoreErr, err)
+			}
+		}
+
+		return restoreErr
+	}
+
+	for i, entry := range record.LFN {
+		location := directoryEntryLocation{
+			Cluster: slots[i].Cluster,
+			Offset:  slots[i].Offset,
+		}
+
+		if err := fs.writeDirectoryEntry(location, entry); err != nil {
+			return errors.Join(err, restore())
+		}
+	}
+
+	shortLocation := directoryEntryLocation{
+		Cluster: slots[len(record.LFN)].Cluster,
+		Offset:  slots[len(record.LFN)].Offset,
+	}
+
+	if err := fs.writeDirectoryEntry(shortLocation, record.Short); err != nil {
+		return errors.Join(err, restore())
 	}
 
 	return nil
