@@ -1032,3 +1032,232 @@ func TestFreeClusterChainWriteFailure(t *testing.T) {
 		)
 	}
 }
+
+func TestWriteFATEntryUpdatesAllFATCopies(t *testing.T) {
+	const (
+		sectorSize = 512
+		cluster    = uint32(2)
+		newValue   = uint32(0x00000009)
+
+		fatOffset     = int64(0)
+		sectorsPerFAT = uint32(1)
+		numberOfFATs  = uint8(2)
+		fat1Offset    = fatOffset
+		fat2Offset    = fatOffset + sectorSize
+	)
+
+	data := make([]byte, sectorSize*3)
+
+	binary.LittleEndian.PutUint32(
+		data[fat1Offset+int64(cluster)*4:],
+		0xA1234567,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fat2Offset+int64(cluster)*4:],
+		0xB7654321,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      3,
+			RootCluster:       cluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	if err := fs.writeFATEntry(cluster, newValue); err != nil {
+		t.Fatalf("writeFATEntry failed: %v", err)
+	}
+
+	gotFAT1 := binary.LittleEndian.Uint32(
+		data[fat1Offset+int64(cluster)*4:],
+	)
+
+	gotFAT2 := binary.LittleEndian.Uint32(
+		data[fat2Offset+int64(cluster)*4:],
+	)
+
+	if gotFAT1 != 0xA0000009 {
+		t.Fatalf(
+			"FAT1[%d] = 0x%08x, want 0xA0000009",
+			cluster,
+			gotFAT1,
+		)
+	}
+
+	if gotFAT2 != 0xB0000009 {
+		t.Fatalf(
+			"FAT2[%d] = 0x%08x, want 0xB0000009",
+			cluster,
+			gotFAT2,
+		)
+	}
+}
+
+func TestAllocateClusterChainRollsBackOnLinkFailure(t *testing.T) {
+	// Make the linking phase fail after some clusters have been allocated,
+	// and verify that all allocated clusters are returned to the free state.
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 10
+		rootCluster   = uint32(2)
+		clusterCount  = 3
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	// Mark clusters 2 and 3 as allocated so allocation starts at 4.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(2)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(3)*4:],
+		fat32EOF,
+	)
+
+	writer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: fatOffset,
+		failCount:  5,
+	}
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: writer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	_, err := fs.allocateClusterChain(clusterCount)
+	if err == nil {
+		t.Fatal("allocateClusterChain succeeded, want error")
+	}
+
+	// Writes 1-3 allocate clusters 4, 5, and 6.
+	// Write 4 links 4 -> 5.
+	// Write 5 attempts to link 5 -> 6 and is injected to fail.
+	// The allocation rollback must then free 4, 5, and 6.
+	for cluster := uint32(4); cluster <= 6; cluster++ {
+		value, err := fs.readFATEntry(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if value != 0 {
+			t.Fatalf(
+				"FAT[%d] = 0x%08x, want free cluster",
+				cluster,
+				value,
+			)
+		}
+	}
+}
+
+func TestWriteFileDuplicateDoesNotAllocateClusters(t *testing.T) {
+	// If the destination already exists, WriteFile should reject it
+	// before allocating any data clusters.
+
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+		existingFile  = "EXISTING.TXT"
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	// Root directory is cluster 2.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	// Cluster 3 contains the existing file.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(3)*4:],
+		fat32EOF,
+	)
+
+	// Place EXISTING.TXT in the root directory.
+	dirOffset := int64(sectorSize * 2)
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'E', 'X', 'I', 'S', 'T', 'I', 'N', 'G', 'T', 'X', 'T'},
+		0x20,
+		3,
+		1,
+	)
+
+	copy(data[dirOffset:dirOffset+32], entry[:])
+
+	// End-of-directory marker.
+	data[dirOffset+32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	before := append([]byte(nil), data...)
+
+	err := fs.WriteFile(existingFile, []byte("new data"))
+	if err == nil {
+		t.Fatal("WriteFile succeeded, want duplicate-file error")
+	}
+
+	if !bytes.Contains([]byte(err.Error()), []byte("already exists")) {
+		t.Fatalf(
+			"error = %q, want duplicate-file error",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed when duplicate file was rejected")
+	}
+}

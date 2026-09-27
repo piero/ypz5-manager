@@ -542,7 +542,7 @@ func TestDeleteCorruptClusterChain(t *testing.T) {
 }
 
 func TestDeleteDirectoryRecordMultipleLFN(t *testing.T) {
-	data := make([]byte, 4096)
+	data := make([]byte, 6656) // 4096 + 2560 (layout.DataOffset)
 
 	boot := BootSector{
 		BytesPerSector:    512,
@@ -1909,53 +1909,67 @@ func (w *failOnWriteCountAt) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-type failDirectoryAndFATRollbackBuffer struct {
-	data []byte
-
-	directoryOffset int64
-	fatOffset       int64
-
-	failDirectoryWrite bool
-	failFATWriteCount  int
-	fatWrites          int
-}
-
-func (b *failDirectoryAndFATRollbackBuffer) ReadAt(
-	p []byte,
-	off int64,
-) (int, error) {
-	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
-		return 0, io.EOF
-	}
-
-	copy(p, b.data[off:off+int64(len(p))])
-	return len(p), nil
-}
-
-func (b *failDirectoryAndFATRollbackBuffer) WriteAt(
-	p []byte,
-	off int64,
-) (int, error) {
-	if off == b.directoryOffset && b.failDirectoryWrite {
-		return 0, errors.New("injected directory write failure")
-	}
-
-	if off == b.fatOffset {
-		b.fatWrites++
-
-		if b.failFATWriteCount > 0 &&
-			b.fatWrites == b.failFATWriteCount {
-			return 0, errors.New("injected FAT rollback failure")
-		}
-	}
-
-	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
-		return 0, io.ErrShortBuffer
-	}
-
-	copy(b.data[off:off+int64(len(p))], p)
-	return len(p), nil
-}
+// type failDirectoryAndFATRollbackBuffer struct {
+// 	data []byte
+//
+// 	directoryOffset         int64
+// 	failDirectoryWrite      bool
+// 	failDirectoryWriteCount int
+// 	directoryWrites         int
+//
+// 	fatOffset         int64
+// 	failFATWriteCount int
+// 	fatWrites         int
+// }
+//
+// func (b *failDirectoryAndFATRollbackBuffer) ReadAt(
+// 	p []byte,
+// 	off int64,
+// ) (int, error) {
+// 	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
+// 		return 0, io.EOF
+// 	}
+//
+// 	copy(p, b.data[off:off+int64(len(p))])
+// 	return len(p), nil
+// }
+//
+// func (b *failDirectoryAndFATRollbackBuffer) WriteAt(
+// 	p []byte,
+// 	off int64,
+// ) (int, error) {
+// 	if off == b.directoryOffset {
+// 		b.directoryWrites++
+//
+// 		if b.failDirectoryWrite ||
+// 			(b.failDirectoryWriteCount > 0 &&
+// 				b.directoryWrites == b.failDirectoryWriteCount) {
+// 			return 0, errors.New(
+// 				"injected directory write failure",
+// 			)
+// 		}
+// 	}
+//
+// 	if off == b.fatOffset {
+// 		b.fatWrites++
+//
+// 		if b.failFATWriteCount > 0 &&
+// 			b.fatWrites == b.failFATWriteCount {
+// 			return 0, errors.New(
+// 				"injected FAT rollback failure",
+// 			)
+// 		}
+// 	}
+//
+// 	if off < 0 ||
+// 		off+int64(len(p)) > int64(len(b.data)) {
+// 		return 0, io.ErrShortBuffer
+// 	}
+//
+// 	copy(b.data[off:off+int64(len(p))], p)
+//
+// 	return len(p), nil
+// }
 
 func TestWriteFileReportsRollbackFailure(t *testing.T) {
 	const (
@@ -5427,6 +5441,1455 @@ func TestWriteFATEntryPreservesHighFourBits(t *testing.T) {
 			cluster,
 			got,
 			want,
+		)
+	}
+}
+
+func TestWriteEmptyFileCreatesDirectoryEntry(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+		name          = "empty.txt"
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	if err := fs.WriteFile(name, nil); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatalf("directory entry %q not found", name)
+	}
+
+	if record.Entry.Size != 0 {
+		t.Fatalf(
+			"file size = %d, want 0",
+			record.Entry.Size,
+		)
+	}
+
+	if record.Entry.StartCluster != 0 {
+		t.Fatalf(
+			"start cluster = %d, want 0",
+			record.Entry.StartCluster,
+		)
+	}
+
+	for cluster := uint32(2); cluster <= fs.boot.MaxCluster(); cluster++ {
+		value, err := fs.readFATEntry(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if cluster == rootCluster {
+			if value < fat32EOF {
+				t.Fatalf(
+					"root FAT[%d] = 0x%08x, want EOF",
+					cluster,
+					value,
+				)
+			}
+			continue
+		}
+
+		if value != 0 {
+			t.Fatalf(
+				"FAT[%d] = 0x%08x, want free cluster",
+				cluster,
+				value,
+			)
+		}
+	}
+}
+
+func TestWriteFileMultiClusterRoundTrip(t *testing.T) {
+	// Exercise the 3 full clusters + partial fourth cluster case
+	// and verify the directory size, chain length, and exact data round-trip.
+
+	const (
+		sectorSize      = 512
+		sectorsPerFAT   = 1
+		numberOfFATs    = 1
+		totalSectors    = 40
+		rootCluster     = uint32(2)
+		bytesPerCluster = sectorSize
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	const extraBytes = 37
+
+	payloadSize := bytesPerCluster*3 + extraBytes
+	payload := make([]byte, payloadSize)
+
+	for i := range payload {
+		payload[i] = byte((i * 37) % 251)
+	}
+
+	const name = "multi.bin"
+
+	if err := fs.WriteFile(name, payload); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	record, err := fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatalf("directory entry %q not found", name)
+	}
+
+	if record.Entry.Size != uint32(len(payload)) {
+		t.Fatalf(
+			"file size = %d, want %d",
+			record.Entry.Size,
+			len(payload),
+		)
+	}
+
+	if record.Entry.StartCluster < 2 {
+		t.Fatalf(
+			"start cluster = %d, want valid cluster",
+			record.Entry.StartCluster,
+		)
+	}
+
+	chain, err := fs.ClusterChain(record.Entry.StartCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantClusters := 4
+
+	if len(chain) != wantClusters {
+		t.Fatalf(
+			"cluster chain length = %d, want %d",
+			len(chain),
+			wantClusters,
+		)
+	}
+
+	got, err := (&File{
+		entry: record.Entry,
+		fs:    fs,
+	}).ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	if !bytes.Equal(got, payload) {
+		t.Fatal("read-back data differs from written data")
+	}
+}
+
+func TestDeleteMultiClusterFileFreesEntireChain(t *testing.T) {
+	// Deleting a multi-cluster file:
+	// 1. create a multi-cluster file;
+	// 2. confirm its chain;
+	// 3. delete it;
+	// 4. confirm the directory entry is gone;
+	// 5. confirm every cluster in the former chain is free;
+	// 6. confirm unrelated/root clusters remain allocated.
+
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 40
+		rootCluster   = uint32(2)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	// Keep the root directory allocated.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	payload := make([]byte, sectorSize*2+17)
+
+	for i := range payload {
+		payload[i] = byte((i * 19) % 251)
+	}
+
+	const name = "delete-me.bin"
+
+	if err := fs.WriteFile(name, payload); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	record, err := fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatalf("directory entry %q not found", name)
+	}
+
+	chain, err := fs.ClusterChain(record.Entry.StartCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chain) != 3 {
+		t.Fatalf(
+			"cluster chain length = %d, want 3",
+			len(chain),
+		)
+	}
+
+	for _, cluster := range chain {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if free {
+			t.Fatalf(
+				"cluster %d is free before deletion",
+				cluster,
+			)
+		}
+	}
+
+	if err := fs.Delete(name); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	record, err = fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record != nil {
+		t.Fatalf(
+			"directory entry %q still exists after deletion",
+			name,
+		)
+	}
+
+	for _, cluster := range chain {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !free {
+			t.Fatalf(
+				"cluster %d is still allocated after deletion",
+				cluster,
+			)
+		}
+	}
+
+	free, err := fs.IsFreeCluster(rootCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatal("root directory cluster was freed")
+	}
+}
+
+func TestDeleteDoesNotFreeFATChainWhenDirectoryDeletionFails(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(5)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize * 2)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	buffer := &failDirectoryAndFATRollbackBuffer{
+		data:               data,
+		directoryOffset:    dataOffset,
+		failDirectoryWrite: true,
+		failFATWriteCount:  0,
+	}
+
+	fs := &Filesystem{
+		reader: buffer,
+		writer: buffer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'F', 'I', 'L', 'E', ' ', ' ', ' ', ' ', 'T', 'X', 'T'},
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	copy(data[dataOffset:dataOffset+32], entry[:])
+	data[dataOffset+32] = 0x00
+
+	before := append([]byte(nil), data...)
+
+	err := fs.Delete("FILE.TXT")
+	if err == nil {
+		t.Fatal("Delete succeeded, want directory write failure")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("injected directory write failure"),
+	) {
+		t.Fatalf(
+			"error = %q, want injected directory write failure",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed despite directory deletion failure")
+	}
+
+	free, err := fs.IsFreeCluster(fileCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatalf(
+			"file cluster %d was freed despite directory deletion failure",
+			fileCluster,
+		)
+	}
+}
+
+func TestDeleteLongFilenameRemovesLFNEntries(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	const name = "This is a sufficiently long filename.txt"
+
+	if err := fs.WriteFile(name, []byte("hello")); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	record, err := fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatalf("directory entry %q not found", name)
+	}
+
+	if len(record.LFN) == 0 {
+		t.Fatal("expected at least one LFN entry")
+	}
+
+	shortLocation := record.Short
+	lfnLocations := append(
+		[]directoryEntryLocation(nil),
+		record.LFN...,
+	)
+
+	if err := fs.Delete(name); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	record, err = fs.findDirectoryEntry(rootCluster, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record != nil {
+		t.Fatalf(
+			"directory entry %q still exists after deletion",
+			name,
+		)
+	}
+
+	for _, location := range lfnLocations {
+		clusterData, err := fs.readCluster(location.Cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if clusterData[location.Offset] != 0xE5 {
+			t.Fatalf(
+				"LFN entry at cluster %d offset %d has first byte 0x%02x, want 0xE5",
+				location.Cluster,
+				location.Offset,
+				clusterData[location.Offset],
+			)
+		}
+	}
+
+	clusterData, err := fs.readCluster(shortLocation.Cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if clusterData[shortLocation.Offset] != 0xE5 {
+		t.Fatalf(
+			"short entry at cluster %d offset %d has first byte 0x%02x, want 0xE5",
+			shortLocation.Cluster,
+			shortLocation.Offset,
+			clusterData[shortLocation.Offset],
+		)
+	}
+}
+
+func TestWriteFileReusesSlotsAfterDeletingLongFilename(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	firstName := "First sufficiently long filename.txt"
+	secondName := "Second sufficiently long filename.txt"
+
+	if err := fs.WriteFile(firstName, []byte("first")); err != nil {
+		t.Fatalf("first WriteFile failed: %v", err)
+	}
+
+	first, err := fs.findDirectoryEntry(rootCluster, firstName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first == nil {
+		t.Fatalf("first file %q not found", firstName)
+	}
+
+	if len(first.LFN) == 0 {
+		t.Fatal("first file has no LFN entries")
+	}
+
+	firstSlots := append(
+		[]directoryEntryLocation(nil),
+		first.LFN...,
+	)
+	firstSlots = append(firstSlots, first.Short)
+
+	if err := fs.Delete(firstName); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	if err := fs.WriteFile(secondName, []byte("second")); err != nil {
+		t.Fatalf("second WriteFile failed: %v", err)
+	}
+
+	second, err := fs.findDirectoryEntry(rootCluster, secondName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if second == nil {
+		t.Fatalf("second file %q not found", secondName)
+	}
+
+	secondSlots := append(
+		[]directoryEntryLocation(nil),
+		second.LFN...,
+	)
+	secondSlots = append(secondSlots, second.Short)
+
+	if len(secondSlots) != len(firstSlots) {
+		t.Fatalf(
+			"second record uses %d slots, first used %d",
+			len(secondSlots),
+			len(firstSlots),
+		)
+	}
+
+	for i := range firstSlots {
+		if secondSlots[i] != firstSlots[i] {
+			t.Fatalf(
+				"second record slot %d = %+v, want %+v",
+				i,
+				secondSlots[i],
+				firstSlots[i],
+			)
+		}
+	}
+}
+
+func TestDeleteDirectoryIsRejectedWithoutMutation(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+		dirCluster    = uint32(3)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(dirCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'T', 'E', 'S', 'T', 'D', 'I', 'R', ' ', ' ', ' ', ' '},
+		0x10,
+		dirCluster,
+		0,
+	)
+
+	dirOffset := int64(sectorSize * 2)
+
+	copy(data[dirOffset:dirOffset+32], entry[:])
+	data[dirOffset+32] = 0x00
+
+	before := append([]byte(nil), data...)
+
+	err := fs.Delete("TESTDIR")
+	if err == nil {
+		t.Fatal("Delete succeeded, want directory error")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("is a directory"),
+	) {
+		t.Fatalf(
+			"error = %q, want directory error",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed when directory deletion was rejected")
+	}
+}
+
+func TestDeleteFragmentedFileFreesFATChain(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+		rootCluster   = uint32(2)
+
+		firstCluster  = uint32(5)
+		secondCluster = uint32(9)
+		thirdCluster  = uint32(14)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	// Root directory remains allocated.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	// Fragmented file chain: 5 -> 9 -> 14 -> EOF.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(firstCluster)*4:],
+		secondCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(secondCluster)*4:],
+		thirdCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(thirdCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'F', 'R', 'A', 'G', 'M', 'E', 'N', 'T', 'B', 'I', 'N'},
+		0x20,
+		firstCluster,
+		sectorSize*2+1,
+	)
+
+	dirOffset := int64(sectorSize * 2)
+
+	copy(data[dirOffset:dirOffset+32], entry[:])
+	data[dirOffset+32] = 0x00
+
+	if err := fs.Delete("FRAGMENT.BIN"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	for _, cluster := range []uint32{
+		firstCluster,
+		secondCluster,
+		thirdCluster,
+	} {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !free {
+			t.Fatalf(
+				"cluster %d is still allocated after deletion",
+				cluster,
+			)
+		}
+	}
+
+	free, err := fs.IsFreeCluster(rootCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatal("root directory cluster was freed")
+	}
+}
+
+func TestDeleteEmptyFileDoesNotTouchFAT(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'E', 'M', 'P', 'T', 'Y', ' ', ' ', ' ', 'T', 'X', 'T'},
+		0x20,
+		0,
+		0,
+	)
+
+	dirOffset := int64(sectorSize * 2)
+
+	copy(data[dirOffset:dirOffset+32], entry[:])
+	data[dirOffset+32] = 0x00
+
+	fatStart := int(fatOffset)
+	fatEnd := fatStart + sectorSize
+
+	beforeFAT := append(
+		[]byte(nil),
+		data[fatStart:fatEnd]...,
+	)
+
+	if err := fs.Delete("EMPTY.TXT"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	afterFAT := data[fatStart:fatEnd]
+
+	if !bytes.Equal(afterFAT, beforeFAT) {
+		t.Fatal("FAT changed when deleting an empty file")
+	}
+
+	if data[dirOffset] != 0xE5 {
+		t.Fatalf(
+			"directory entry marker = 0x%02x, want 0xE5",
+			data[dirOffset],
+		)
+	}
+}
+
+func TestDeleteNonexistentFileDoesNotMutate(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 20
+		rootCluster   = uint32(2)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	before := append([]byte(nil), data...)
+
+	err := fs.Delete("DOESNOT.EXIST")
+	if err == nil {
+		t.Fatal("Delete succeeded, want entry-not-found error")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("entry not found"),
+	) {
+		t.Fatalf(
+			"error = %q, want entry-not-found error",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed when deleting nonexistent file")
+	}
+}
+
+func TestDeleteFileInSubdirectory(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+
+		rootCluster = uint32(2)
+		dirCluster  = uint32(3)
+		fileCluster = uint32(5)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	// Root directory.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	// Subdirectory.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(dirCluster)*4:],
+		fat32EOF,
+	)
+
+	// File.
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	rootOffset := int64(sectorSize * 2)
+	dirOffset := int64(sectorSize * 3)
+
+	// Root entry: TESTDIR/
+	dirEntry := encodeDirectoryEntry(
+		[11]byte{'T', 'E', 'S', 'T', 'D', 'I', 'R', ' ', ' ', ' ', ' '},
+		0x10,
+		dirCluster,
+		0,
+	)
+
+	copy(data[rootOffset:rootOffset+32], dirEntry[:])
+	data[rootOffset+32] = 0x00
+
+	// Subdirectory entry: FILE.TXT
+	fileEntry := encodeDirectoryEntry(
+		[11]byte{'F', 'I', 'L', 'E', ' ', ' ', ' ', ' ', 'T', 'X', 'T'},
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	copy(data[dirOffset:dirOffset+32], fileEntry[:])
+	data[dirOffset+32] = 0x00
+
+	if err := fs.Delete("TESTDIR/FILE.TXT"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	if data[dirOffset] != 0xE5 {
+		t.Fatalf(
+			"file directory entry marker = 0x%02x, want 0xE5",
+			data[dirOffset],
+		)
+	}
+
+	free, err := fs.IsFreeCluster(fileCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf("file cluster %d is still allocated", fileCluster)
+	}
+
+	free, err = fs.IsFreeCluster(dirCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatalf("directory cluster %d was freed", dirCluster)
+	}
+}
+
+func TestDeleteThroughFilePathDoesNotMutate(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(5)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: &writerAtBuffer{data: data},
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      sectorSize * 2,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	dirOffset := int64(sectorSize * 2)
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'F', 'I', 'L', 'E', ' ', ' ', ' ', ' ', 'T', 'X', 'T'},
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	copy(data[dirOffset:dirOffset+32], entry[:])
+	data[dirOffset+32] = 0x00
+
+	before := append([]byte(nil), data...)
+
+	err := fs.Delete("FILE.TXT/CHILD.TXT")
+	if err == nil {
+		t.Fatal("Delete succeeded, want not-a-directory error")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("is not a directory"),
+	) {
+		t.Fatalf(
+			"error = %q, want not-a-directory error",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed when parent path was a file")
+	}
+}
+
+func TestDeleteFATFailureRollsBackCurrentFATEntry(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+
+		rootCluster   = uint32(2)
+		firstCluster  = uint32(5)
+		secondCluster = uint32(9)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize * 2)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(firstCluster)*4:],
+		secondCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(secondCluster)*4:],
+		fat32EOF,
+	)
+
+	buffer := &failDirectoryAndFATRollbackBuffer{
+		data:              data,
+		directoryOffset:   dataOffset,
+		failFATWriteCount: 2,
+	}
+
+	fs := &Filesystem{
+		reader: buffer,
+		writer: buffer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	entry := encodeDirectoryEntry(
+		[11]byte{'F', 'I', 'L', 'E', ' ', ' ', ' ', ' ', 'T', 'X', 'T'},
+		0x20,
+		firstCluster,
+		sectorSize+1,
+	)
+
+	copy(data[dataOffset:dataOffset+32], entry[:])
+	data[dataOffset+32] = 0x00
+
+	if err := fs.Delete("FILE.TXT"); err == nil {
+		t.Fatal("Delete succeeded, want FAT write failure")
+	}
+
+	// The directory entry was successfully deleted before FAT freeing
+	// began.
+	if data[dataOffset] != 0xE5 {
+		t.Fatalf(
+			"directory entry marker = 0x%02x, want 0xE5",
+			data[dataOffset],
+		)
+	}
+
+	// The first cluster was freed successfully.
+	free, err := fs.IsFreeCluster(firstCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf(
+			"first file cluster %d was not freed",
+			firstCluster,
+		)
+	}
+
+	// The second FAT update failed, so its original EOF value must
+	// still be present.
+	free, err = fs.IsFreeCluster(secondCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatalf(
+			"second file cluster %d was freed despite injected failure",
+			secondCluster,
+		)
+	}
+
+	value, err := fs.readFATEntry(secondCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if value != fat32EOF {
+		t.Fatalf(
+			"second file cluster FAT value = %#x, want EOF",
+			value,
+		)
+	}
+}
+
+type failDirectoryAndFATRollbackBuffer struct {
+	data []byte
+
+	directoryOffset         int64
+	failDirectoryWrite      bool
+	failDirectoryWriteCount int
+	directoryWrites         int
+
+	fatOffset         int64
+	failFATWriteCount int
+	fatWrites         int
+}
+
+func (b *failDirectoryAndFATRollbackBuffer) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
+		return 0, io.EOF
+	}
+
+	start := int(off)
+	end := start + len(p)
+
+	copy(p, b.data[start:end])
+
+	return len(p), nil
+}
+
+func (b *failDirectoryAndFATRollbackBuffer) WriteAt(p []byte, off int64) (int, error) {
+	if off == b.directoryOffset {
+		b.directoryWrites++
+
+		if b.failDirectoryWrite ||
+			(b.failDirectoryWriteCount > 0 &&
+				b.directoryWrites == b.failDirectoryWriteCount) {
+			return 0, errors.New("injected directory write failure")
+		}
+	}
+
+	if off == b.fatOffset {
+		b.fatWrites++
+
+		if b.failFATWriteCount > 0 &&
+			b.fatWrites == b.failFATWriteCount {
+			return 0, errors.New("injected FAT rollback failure")
+		}
+	}
+
+	if off < 0 || off+int64(len(p)) > int64(len(b.data)) {
+		return 0, io.ErrShortBuffer
+	}
+
+	start := int(off)
+	end := start + len(p)
+
+	copy(b.data[start:end], p)
+
+	return len(p), nil
+}
+
+func TestDeleteLongFilenameFailureDoesNotPartiallyDeleteRecord(t *testing.T) {
+	const (
+		sectorSize    = 512
+		sectorsPerFAT = 1
+		numberOfFATs  = 1
+		totalSectors  = 30
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(5)
+	)
+
+	data := make([]byte, sectorSize*totalSectors)
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize * 2)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+int64(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	buffer := &failDirectoryAndFATRollbackBuffer{
+		data:                    data,
+		directoryOffset:         dataOffset,
+		failDirectoryWriteCount: 2,
+		fatOffset:               fatOffset,
+	}
+
+	fs := &Filesystem{
+		reader: buffer,
+		writer: buffer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      numberOfFATs,
+			SectorsPerFAT:     sectorsPerFAT,
+			TotalSectors:      totalSectors,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: sectorSize,
+		},
+	}
+
+	name := "A very long filename.txt"
+
+	shortName, err := encodeShortName("A~1.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shortEntryForChecksum := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	checksum := shortNameChecksum(shortEntryForChecksum[:])
+
+	lfnEntries, err := encodeLFNEntries(name, checksum)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(lfnEntries) < 2 {
+		t.Fatalf(
+			"LFN entry count = %d, want at least 2",
+			len(lfnEntries),
+		)
+	}
+
+	for i, lfn := range lfnEntries {
+		copy(
+			data[dataOffset+int64(i*32):dataOffset+int64(i*32)+32],
+			lfn[:],
+		)
+	}
+
+	shortEntry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	shortOffset := dataOffset + int64(len(lfnEntries)*32)
+
+	copy(
+		data[shortOffset:shortOffset+32],
+		shortEntry[:],
+	)
+
+	data[shortOffset+32] = 0x00
+
+	before := append([]byte(nil), data...)
+
+	err = fs.Delete(name)
+	if err == nil {
+		t.Fatal("Delete succeeded, want directory write failure")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("injected directory write failure"),
+	) {
+		t.Fatalf(
+			"error = %q, want injected directory write failure",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal(
+			"directory record was partially modified after deletion failure",
+		)
+	}
+
+	free, err := fs.IsFreeCluster(fileCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatalf(
+			"file cluster %d was freed after directory deletion failure",
+			fileCluster,
 		)
 	}
 }

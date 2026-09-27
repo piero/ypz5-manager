@@ -160,7 +160,7 @@ func TestCombineLFNUsesSequenceOrder(t *testing.T) {
 }
 
 func TestDeleteDirectoryRecord(t *testing.T) {
-	data := make([]byte, 4096)
+	data := make([]byte, 6656) // 4096 + 2560 (layout.DataOffset)
 
 	boot := BootSector{
 		BytesPerSector:    512,

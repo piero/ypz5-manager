@@ -718,14 +718,41 @@ func (fs *Filesystem) deleteDirectoryRecord(
 		return err
 	}
 
-	for _, location := range record.LFN {
-		if err := fs.markDirectoryEntryDeleted(location); err != nil {
+	locations := make([]directoryEntryLocation, 0, len(record.LFN)+1)
+	locations = append(locations, record.LFN...)
+	locations = append(locations, record.Short)
+
+	originalClusters := make(map[uint32][]byte)
+
+	for _, location := range locations {
+		if _, exists := originalClusters[location.Cluster]; exists {
+			continue
+		}
+
+		data, err := fs.readCluster(location.Cluster)
+		if err != nil {
 			return err
 		}
+
+		originalClusters[location.Cluster] = data
 	}
 
-	if err := fs.markDirectoryEntryDeleted(record.Short); err != nil {
-		return err
+	restore := func() error {
+		var restoreErr error
+
+		for cluster, data := range originalClusters {
+			if err := fs.writeCluster(cluster, data); err != nil {
+				restoreErr = errors.Join(restoreErr, err)
+			}
+		}
+
+		return restoreErr
+	}
+
+	for _, location := range locations {
+		if err := fs.markDirectoryEntryDeleted(location); err != nil {
+			return errors.Join(err, restore())
+		}
 	}
 
 	return nil
