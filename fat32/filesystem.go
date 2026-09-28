@@ -202,6 +202,7 @@ func (fs *Filesystem) WriteFile(path string, data []byte) error {
 		name,
 		startCluster,
 		uint32(len(data)),
+		false,
 	); err != nil {
 		if len(chain) > 0 {
 			if rollbackErr := fs.freeClusterChain(chain[0]); rollbackErr != nil {
@@ -338,6 +339,93 @@ func (fs *Filesystem) ReplaceFile(path string, data []byte) error {
 				err,
 			)
 		}
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) Mkdir(path string) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	parentPath, name, err := splitFilePath(path)
+	if err != nil {
+		return err
+	}
+
+	parentCluster, err := fs.findDirectoryCluster(parentPath)
+	if err != nil {
+		return err
+	}
+
+	existing, err := fs.findDirectoryEntry(parentCluster, name)
+	if err != nil {
+		return err
+	}
+
+	if existing != nil {
+		return fmt.Errorf(
+			"file or directory %q already exists",
+			path,
+		)
+	}
+
+	cluster, err := fs.allocateCluster()
+	if err != nil {
+		return err
+	}
+
+	rollback := func(original error) error {
+		if rollbackErr := fs.writeFATEntry(cluster, 0); rollbackErr != nil {
+			return errors.Join(original, rollbackErr)
+		}
+
+		return original
+	}
+
+	directoryData := make([]byte, fs.layout.BytesPerCluster)
+
+	dotEntry, err := encodeSpecialDirectoryEntry(
+		".",
+		cluster,
+	)
+	if err != nil {
+		return rollback(err)
+	}
+
+	dotDotCluster := parentCluster
+
+	if parentCluster == fs.boot.RootCluster {
+		dotDotCluster = 0
+	}
+
+	dotDotEntry, err := encodeSpecialDirectoryEntry(
+		"..",
+		dotDotCluster,
+	)
+	if err != nil {
+		return rollback(err)
+	}
+
+	copy(directoryData[0:32], dotEntry[:])
+	copy(directoryData[32:64], dotDotEntry[:])
+
+	if err := fs.writeCluster(
+		cluster,
+		directoryData,
+	); err != nil {
+		return rollback(err)
+	}
+
+	if err := fs.createDirectoryRecord(
+		parentCluster,
+		name,
+		cluster,
+		0,
+		true,
+	); err != nil {
+		return rollback(err)
 	}
 
 	return nil
@@ -505,6 +593,9 @@ func (fs *Filesystem) expandDirectory(
 	return nil
 }
 
+
+
+
 // createDirectoryRecord behaviour:
 // directory completely full
 //
@@ -525,17 +616,31 @@ func (fs *Filesystem) createDirectoryRecord(
 	name string,
 	startCluster uint32,
 	size uint32,
+	isDir bool,
 ) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
 
-	shortName, err := fs.generateUniqueShortName(
-		directoryCluster,
-		name,
-	)
-	if err != nil {
-		return err
+	var shortName [11]byte
+
+	if isShortName(name) {
+		var err error
+
+		shortName, err = encodeShortName(name)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+
+		shortName, err = fs.generateUniqueShortName(
+			directoryCluster,
+			name,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	record, err := encodeDirectoryRecordWithShortName(
@@ -543,44 +648,13 @@ func (fs *Filesystem) createDirectoryRecord(
 		shortName,
 		startCluster,
 		size,
+		isDir,
 	)
 	if err != nil {
 		return err
 	}
 
 	slotCount := len(record.LFN) + 1
-
-	/*
-		slots, err := fs.findFreeDirectorySlots(
-			directoryCluster,
-			slotCount,
-		)
-		if err != nil {
-			if !errors.Is(err, errDirectoryFull) {
-				return err
-			}
-
-			entriesPerCluster := int(fs.layout.BytesPerCluster / 32)
-
-			clustersNeeded := (slotCount + entriesPerCluster - 1) /
-				entriesPerCluster
-
-			if err := fs.expandDirectory(
-				directoryCluster,
-				clustersNeeded,
-			); err != nil {
-				return err
-			}
-
-			slots, err = fs.findFreeDirectorySlots(
-				directoryCluster,
-				slotCount,
-			)
-			if err != nil {
-				return err
-			}
-		}
-	*/
 
 	slots, err := fs.findFreeDirectorySlots(
 		directoryCluster,
@@ -592,7 +666,9 @@ func (fs *Filesystem) createDirectoryRecord(
 			return err
 		}
 
-		entriesPerCluster := int(fs.layout.BytesPerCluster / 32)
+		entriesPerCluster := int(
+			fs.layout.BytesPerCluster / 32,
+		)
 
 		clustersNeeded := (slotCount + entriesPerCluster - 1) /
 			entriesPerCluster
@@ -613,5 +689,8 @@ func (fs *Filesystem) createDirectoryRecord(
 		}
 	}
 
-	return fs.writeEncodedDirectoryRecord(record, slots)
+	return fs.writeEncodedDirectoryRecord(
+		record,
+		slots,
+	)
 }

@@ -422,6 +422,84 @@ func TestEncodeDirectoryEntry(t *testing.T) {
 	}
 }
 
+func TestEncodeSpecialDirectoryEntry(t *testing.T) {
+	tests := []struct {
+		name         string
+		startCluster uint32
+		wantName     [11]byte
+	}{
+		{
+			name:         ".",
+			startCluster: 42,
+			wantName: [11]byte{
+				'.', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+				' ', ' ', ' ',
+			},
+		},
+		{
+			name:         "..",
+			startCluster: 43,
+			wantName: [11]byte{
+				'.', '.', ' ', ' ', ' ', ' ', ' ', ' ',
+				' ', ' ', ' ',
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry, err := encodeSpecialDirectoryEntry(
+				tt.name,
+				tt.startCluster,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !bytes.Equal(entry[0:11], tt.wantName[:]) {
+				t.Fatalf(
+					"short name = %q, want %q",
+					entry[0:11],
+					tt.wantName,
+				)
+			}
+
+			if entry[0x0B] != 0x10 {
+				t.Fatalf(
+					"attribute = 0x%02x, want directory 0x10",
+					entry[0x0B],
+				)
+			}
+
+			gotCluster :=
+				uint32(binary.LittleEndian.Uint16(entry[0x14:0x16]))<<16 |
+					uint32(binary.LittleEndian.Uint16(entry[0x1A:0x1C]))
+
+			if gotCluster != tt.startCluster {
+				t.Fatalf(
+					"start cluster = %d, want %d",
+					gotCluster,
+					tt.startCluster,
+				)
+			}
+
+			if size := binary.LittleEndian.Uint32(entry[0x1C:0x20]); size != 0 {
+				t.Fatalf(
+					"size = %d, want 0",
+					size,
+				)
+			}
+		})
+	}
+}
+
+func TestEncodeSpecialDirectoryEntryRejectsInvalidName(t *testing.T) {
+	_, err := encodeSpecialDirectoryEntry("foo", 42)
+	if err == nil {
+		t.Fatal("encodeSpecialDirectoryEntry succeeded for invalid name")
+	}
+}
+
 func TestEncodeLFNEntry(t *testing.T) {
 	data, err := encodeLFNEntry(0x41, "Hello", 0xAB)
 	if err != nil {
@@ -1540,6 +1618,7 @@ func TestCreateDirectoryRecord(t *testing.T) {
 		name,
 		startCluster,
 		size,
+		false,
 	); err != nil {
 		t.Fatal(err)
 	}

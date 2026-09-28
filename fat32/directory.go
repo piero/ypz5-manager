@@ -320,6 +320,39 @@ func encodeDirectoryEntry(
 	return data
 }
 
+func encodeSpecialDirectoryEntry(
+	name string,
+	startCluster uint32,
+) ([32]byte, error) {
+	var shortName [11]byte
+
+	for i := range shortName {
+		shortName[i] = ' '
+	}
+
+	switch name {
+	case ".":
+		shortName[0] = '.'
+
+	case "..":
+		shortName[0] = '.'
+		shortName[1] = '.'
+
+	default:
+		return [32]byte{}, fmt.Errorf(
+			"invalid special directory entry: %q",
+			name,
+		)
+	}
+
+	return encodeDirectoryEntry(
+		shortName,
+		0x10,
+		startCluster,
+		0,
+	), nil
+}
+
 type lfnEntry struct {
 	Sequence     uint8
 	IsLast       bool
@@ -768,8 +801,6 @@ func encodeDirectoryRecord(
 	startCluster uint32,
 	size uint32,
 ) (encodedDirectoryRecord, error) {
-	var result encodedDirectoryRecord
-
 	var shortName [11]byte
 
 	if isShortName(name) {
@@ -777,38 +808,24 @@ func encodeDirectoryRecord(
 
 		shortName, err = encodeShortName(name)
 		if err != nil {
-			return result, err
+			return encodedDirectoryRecord{}, err
 		}
 	} else {
 		var err error
 
 		shortName, err = generateShortName(name, 1)
 		if err != nil {
-			return result, err
+			return encodedDirectoryRecord{}, err
 		}
 	}
 
-	shortEntry := encodeDirectoryEntry(
+	return encodeDirectoryRecordWithShortName(
+		name,
 		shortName,
-		0x20, // archive
 		startCluster,
 		size,
+		false,
 	)
-
-	result.Short = shortEntry
-
-	if !isShortName(name) {
-		checksum := shortNameChecksum(shortEntry[:])
-
-		lfnEntries, err := encodeLFNEntries(name, checksum)
-		if err != nil {
-			return result, err
-		}
-
-		result.LFN = lfnEntries
-	}
-
-	return result, nil
 }
 
 func (fs *Filesystem) writeDirectoryEntry(
@@ -1110,12 +1127,19 @@ func encodeDirectoryRecordWithShortName(
 	shortName [11]byte,
 	startCluster uint32,
 	size uint32,
+	isDir bool,
 ) (encodedDirectoryRecord, error) {
 	var result encodedDirectoryRecord
 
+	attr := byte(0x20) // archive
+
+	if isDir {
+		attr = 0x10 // directory
+	}
+
 	shortEntry := encodeDirectoryEntry(
 		shortName,
-		0x20,
+		attr,
 		startCluster,
 		size,
 	)
