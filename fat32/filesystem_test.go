@@ -6086,6 +6086,152 @@ func TestWriteFileReusesSlotsAfterDeletingLongFilename(t *testing.T) {
 	}
 }
 
+func TestReplaceFileRoundTrip(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT    uint32 = 1
+		numberOfFATs     uint8  = 1
+		totalSectors     uint32 = 30
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	shortName, err := encodeShortName("TEST.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shortEntry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		3,
+	)
+
+	directoryOffset := int(dataOffset)
+
+	copy(
+		data[directoryOffset:directoryOffset+32],
+		shortEntry[:],
+	)
+
+	data[directoryOffset+32] = 0x00
+
+	oldDataOffset := directoryOffset +
+		(int(fileCluster)-2)*int(layout.BytesPerCluster)
+
+	copy(
+		data[oldDataOffset:oldDataOffset+3],
+		[]byte("old"),
+	)
+
+	buffer := writerAtBuffer{data: data}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.ReplaceFile(
+		"TEST.TXT",
+		[]byte("new contents"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		"TEST.TXT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("replacement file was not found")
+	}
+
+	if record.Entry.Size != uint32(len("new contents")) {
+		t.Fatalf(
+			"file size = %d, want %d",
+			record.Entry.Size,
+			len("new contents"),
+		)
+	}
+
+	if record.Entry.StartCluster == fileCluster {
+		t.Fatalf(
+			"replacement reused old cluster %d",
+			fileCluster,
+		)
+	}
+
+	file := &File{
+		entry: record.Entry,
+		fs:    fs,
+	}
+
+	got, err := file.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, []byte("new contents")) {
+		t.Fatalf(
+			"replacement contents = %q, want %q",
+			got,
+			"new contents",
+		)
+	}
+
+	free, err := fs.IsFreeCluster(fileCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf(
+			"old cluster %d was not freed",
+			fileCluster,
+		)
+	}
+}
+
 func TestDeleteDirectoryIsRejectedWithoutMutation(t *testing.T) {
 	const (
 		sectorSize    = 512

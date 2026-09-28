@@ -1,6 +1,7 @@
 package fat32
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -209,6 +210,134 @@ func (fs *Filesystem) WriteFile(path string, data []byte) error {
 		}
 
 		return err
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) ReplaceFile(path string, data []byte) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	parentPath, name, err := splitFilePath(path)
+	if err != nil {
+		return err
+	}
+
+	parentCluster, err := fs.findDirectoryCluster(parentPath)
+	if err != nil {
+		return err
+	}
+
+	record, err := fs.findDirectoryEntry(parentCluster, name)
+	if err != nil {
+		return err
+	}
+
+	if record == nil {
+		return fmt.Errorf("file %q does not exist", path)
+	}
+
+	if record.Entry.IsDir {
+		return fmt.Errorf("%q is a directory", path)
+	}
+
+	var oldChain []uint32
+
+	if record.Entry.StartCluster != 0 {
+		oldChain, err = fs.readClusterChain(record.Entry.StartCluster)
+		if err != nil {
+			return err
+		}
+	}
+
+	newChain, err := fs.writeNewFileData(data)
+	if err != nil {
+		return err
+	}
+
+	var newStartCluster uint32
+
+	if len(newChain) > 0 {
+		newStartCluster = newChain[0]
+	}
+
+	shortClusterData, err := fs.readCluster(record.Short.Cluster)
+	if err != nil {
+		if len(newChain) > 0 {
+			rollbackErr := fs.freeClusterChain(newChain[0])
+			return errors.Join(err, rollbackErr)
+		}
+
+		return err
+	}
+
+	shortOffset := int(record.Short.Offset)
+
+	if shortOffset < 0 ||
+		shortOffset+32 > len(shortClusterData) {
+		if len(newChain) > 0 {
+			rollbackErr := fs.freeClusterChain(newChain[0])
+			return errors.Join(
+				fmt.Errorf(
+					"directory entry offset %d is outside cluster %d",
+					record.Short.Offset,
+					record.Short.Cluster,
+				),
+				rollbackErr,
+			)
+		}
+
+		return fmt.Errorf(
+			"directory entry offset %d is outside cluster %d",
+			record.Short.Offset,
+			record.Short.Cluster,
+		)
+	}
+
+	var shortEntry [32]byte
+
+	copy(
+		shortEntry[:],
+		shortClusterData[shortOffset:shortOffset+32],
+	)
+
+	binary.LittleEndian.PutUint16(
+		shortEntry[0x14:0x16],
+		uint16(newStartCluster>>16),
+	)
+
+	binary.LittleEndian.PutUint16(
+		shortEntry[0x1A:0x1C],
+		uint16(newStartCluster),
+	)
+
+	binary.LittleEndian.PutUint32(
+		shortEntry[0x1C:0x20],
+		uint32(len(data)),
+	)
+
+	if err := fs.writeDirectoryEntry(
+		record.Short,
+		shortEntry,
+	); err != nil {
+		if len(newChain) > 0 {
+			rollbackErr := fs.freeClusterChain(newChain[0])
+			return errors.Join(err, rollbackErr)
+		}
+
+		return err
+	}
+
+	for _, cluster := range oldChain {
+		if err := fs.writeFATEntry(cluster, 0); err != nil {
+			return fmt.Errorf(
+				"free old cluster %d: %w",
+				cluster,
+				err,
+			)
+		}
 	}
 
 	return nil
