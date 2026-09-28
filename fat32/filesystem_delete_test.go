@@ -3,6 +3,8 @@ package fat32
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -1969,6 +1971,473 @@ func TestDeleteLongFilenameRemovesLFNEntries(t *testing.T) {
 			shortLocation.Cluster,
 			shortLocation.Offset,
 			clusterData[shortLocation.Offset],
+		)
+	}
+}
+
+// Reject deletion of a non-empty directory.
+// Verifies that attempting to delete a non-empty directory is rejected
+// and leaves the entire filesystem image unchanged.
+func TestDeleteNonEmptyDirectoryIsRejectedWithoutMutation(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 60
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	// Make root directory empty.
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("PARENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/CHILD.TXT",
+		[]byte("content"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	before := append([]byte(nil), data...)
+
+	err := fs.Delete("PARENT")
+
+	if err == nil {
+		t.Fatal("Delete(PARENT) unexpectedly succeeded")
+	}
+
+	if !strings.Contains(err.Error(), "directory") {
+		t.Fatalf(
+			"Delete(PARENT) error = %q, want directory error",
+			err,
+		)
+	}
+
+	if !bytes.Equal(data, before) {
+		t.Fatal("filesystem changed after rejected directory deletion")
+	}
+
+	parent, err := fs.findDirectoryEntry(
+		rootCluster,
+		"PARENT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if parent == nil {
+		t.Fatal("PARENT disappeared after rejected deletion")
+	}
+
+	child, err := fs.findDirectoryEntry(
+		parent.Entry.StartCluster,
+		"CHILD.TXT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if child == nil {
+		t.Fatal("CHILD.TXT disappeared after rejected deletion")
+	}
+}
+
+// Delete a file from an expanded directory.
+// Verifies that Delete correctly locates and removes an entry
+// in a continuation cluster of a directory, while also freeing
+// the file's data cluster.
+func TestDeleteFileFromExpandedDirectory(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		if err := fs.WriteFile(
+			name,
+			[]byte("content"),
+		); err != nil {
+			t.Fatalf(
+				"WriteFile(%q): %v",
+				name,
+				err,
+			)
+		}
+	}
+
+	target := "TARGET.TXT"
+
+	if err := fs.WriteFile(
+		target,
+		[]byte("target content"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeDelete, err := fs.findDirectoryEntry(
+		rootCluster,
+		target,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if beforeDelete == nil {
+		t.Fatal("TARGET.TXT was not created")
+	}
+
+	if beforeDelete.Short.Cluster == rootCluster {
+		t.Fatal(
+			"TARGET.TXT is still in the first directory cluster; " +
+				"test did not exercise expanded-directory deletion",
+		)
+	}
+
+	targetCluster := beforeDelete.Entry.StartCluster
+
+	if targetCluster < 2 {
+		t.Fatalf(
+			"TARGET.TXT start cluster = %d, want valid cluster",
+			targetCluster,
+		)
+	}
+
+	free, err := fs.IsFreeCluster(targetCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if free {
+		t.Fatalf(
+			"TARGET.TXT data cluster %d is unexpectedly free",
+			targetCluster,
+		)
+	}
+
+	if err := fs.Delete(target); err != nil {
+		t.Fatal(err)
+	}
+
+	afterDelete, err := fs.findDirectoryEntry(
+		rootCluster,
+		target,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if afterDelete != nil {
+		t.Fatal("TARGET.TXT still exists after deletion")
+	}
+
+	free, err = fs.IsFreeCluster(targetCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf(
+			"TARGET.TXT data cluster %d is still allocated",
+			targetCluster,
+		)
+	}
+}
+
+// LFN spanning a directory-cluster boundary.
+func TestDeleteLongFilenameAcrossDirectoryClusterBoundary(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster   = uint32(2)
+		secondCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		secondCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(secondCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	// Leave the first 14 directory slots occupied. Slots 14 and 15
+	// are available, so a long filename requiring at least four
+	// entries must cross the cluster boundary.
+	for i := 0; i < 14; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		shortName, err := encodeShortName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entry := encodeDirectoryEntry(
+			shortName,
+			0x20,
+			0,
+			0,
+		)
+
+		offset := int(dataOffset) + i*32
+
+		copy(
+			data[offset:offset+32],
+			entry[:],
+		)
+	}
+
+	data[int(dataOffset)+14*32] = 0xE5
+	data[int(dataOffset)+15*32] = 0xE5
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	name := "This is a filename that crosses the directory cluster boundary.txt"
+
+	content := []byte("content")
+
+	if err := fs.WriteFile(name, content); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("long filename was not created")
+	}
+
+	if len(record.LFN) < 2 {
+		t.Fatalf(
+			"LFN entry count = %d, want at least 2",
+			len(record.LFN),
+		)
+	}
+
+	if record.Short.Cluster != secondCluster {
+		t.Fatalf(
+			"short entry cluster = %d, want %d",
+			record.Short.Cluster,
+			secondCluster,
+		)
+	}
+
+	// Capture the physical locations before deletion. Delete will
+	// remove the directory record, so these locations must be saved
+	// now in order to verify the physical changes afterward.
+	locations := make([]directoryEntryLocation, 0, len(record.LFN)+1)
+
+	locations = append(locations, record.LFN...)
+	locations = append(locations, record.Short)
+
+	// Confirm that the record actually crosses the directory-cluster
+	// boundary.
+	crossesBoundary := false
+
+	for _, location := range locations {
+		if location.Cluster == rootCluster {
+			continue
+		}
+
+		if location.Cluster == secondCluster {
+			crossesBoundary = true
+			break
+		}
+	}
+
+	if !crossesBoundary {
+		t.Fatal(
+			"long filename record does not cross the directory cluster boundary",
+		)
+	}
+
+	if err := fs.Delete(name); err != nil {
+		t.Fatal(err)
+	}
+
+	deletedRecord, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if deletedRecord != nil {
+		t.Fatal("long filename still exists after deletion")
+	}
+
+	// Every physical directory entry belonging to the record must
+	// now have the FAT32 deleted-entry marker 0xE5.
+	for i, location := range locations {
+		clusterData, err := fs.readCluster(location.Cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		offset := int(location.Offset)
+
+		if offset < 0 || offset >= len(clusterData) {
+			t.Fatalf(
+				"deleted entry %d has invalid offset %d in cluster %d",
+				i,
+				location.Offset,
+				location.Cluster,
+			)
+		}
+
+		if clusterData[offset] != 0xE5 {
+			t.Fatalf(
+				"deleted entry %d at cluster %d offset %d = 0x%02x, want 0xE5",
+				i,
+				location.Cluster,
+				location.Offset,
+				clusterData[offset],
+			)
+		}
+	}
+
+	// The file's data cluster must also have been freed.
+	free, err := fs.IsFreeCluster(record.Entry.StartCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf(
+			"file data cluster %d is still allocated",
+			record.Entry.StartCluster,
 		)
 	}
 }

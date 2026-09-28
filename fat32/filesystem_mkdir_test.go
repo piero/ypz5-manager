@@ -1366,3 +1366,220 @@ func TestMkdirExpandsParentDirectory(t *testing.T) {
 		)
 	}
 }
+
+// Expand a subdirectory while creating another directory.
+//
+// This specifically validates the distinction between:
+// - PARENT being expanded;
+// - CHILD being placed in the expanded portion;
+// - CHILD/. → CHILD;
+// - CHILD/.. → PARENT.
+func TestMkdirExpandsSubdirectory(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 60
+
+		rootCluster   = uint32(2)
+		parentCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(parentCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	// Create PARENT in the root directory.
+	parentShortName, err := encodeShortName("PARENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentEntry := encodeDirectoryEntry(
+		parentShortName,
+		0x10,
+		parentCluster,
+		0,
+	)
+
+	rootOffset := int(dataOffset)
+
+	copy(
+		data[rootOffset:rootOffset+32],
+		parentEntry[:],
+	)
+
+	data[rootOffset+32] = 0x00
+
+	// Fill PARENT completely with live entries so that creating
+	// CHILD must expand the PARENT directory.
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		shortName, err := encodeShortName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entry := encodeDirectoryEntry(
+			shortName,
+			0x20,
+			0,
+			0,
+		)
+
+		offset := int(dataOffset) +
+			int(parentCluster-rootCluster)*int(sectorSize) +
+			i*32
+
+		copy(
+			data[offset:offset+32],
+			entry[:],
+		)
+	}
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("PARENT/CHILD"); err != nil {
+		t.Fatal(err)
+	}
+
+	child, err := fs.findDirectoryEntry(
+		parentCluster,
+		"CHILD",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if child == nil {
+		t.Fatal("CHILD directory was not created")
+	}
+
+	if !child.Entry.IsDir {
+		t.Fatal("CHILD is not a directory")
+	}
+
+	// Verify that PARENT was expanded.
+	parentChain, err := fs.readClusterChain(parentCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(parentChain) < 2 {
+		t.Fatalf(
+			"PARENT directory chain has %d clusters, want at least 2",
+			len(parentChain),
+		)
+	}
+
+	// Verify that CHILD is present in the expanded directory.
+	foundChild := false
+
+	for _, cluster := range parentChain {
+		records, err := fs.readDirectoryRecords(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, record := range records {
+			if strings.EqualFold(record.Entry.Name, "CHILD") {
+				foundChild = true
+				break
+			}
+		}
+
+		if foundChild {
+			break
+		}
+	}
+
+	if !foundChild {
+		t.Fatal("CHILD entry was not found in expanded PARENT directory")
+	}
+
+	// Verify "." and ".." in CHILD.
+	childRecords, err := fs.readDirectoryRecords(
+		child.Entry.StartCluster,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(childRecords) != 2 {
+		t.Fatalf(
+			"CHILD contains %d records, want 2",
+			len(childRecords),
+		)
+	}
+
+	if childRecords[0].Entry.Name != "." {
+		t.Fatalf(
+			"first CHILD entry = %q, want %q",
+			childRecords[0].Entry.Name,
+			".",
+		)
+	}
+
+	if childRecords[0].Entry.StartCluster != child.Entry.StartCluster {
+		t.Fatalf(
+			"CHILD '.' cluster = %d, want %d",
+			childRecords[0].Entry.StartCluster,
+			child.Entry.StartCluster,
+		)
+	}
+
+	if childRecords[1].Entry.Name != ".." {
+		t.Fatalf(
+			"second CHILD entry = %q, want %q",
+			childRecords[1].Entry.Name,
+			"..",
+		)
+	}
+
+	if childRecords[1].Entry.StartCluster != parentCluster {
+		t.Fatalf(
+			"CHILD '..' cluster = %d, want parent cluster %d",
+			childRecords[1].Entry.StartCluster,
+			parentCluster,
+		)
+	}
+}
