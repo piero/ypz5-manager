@@ -1030,6 +1030,11 @@ func (fs *Filesystem) findDirectoryCluster(path string) (uint32, error) {
 			continue
 		}
 
+		if component == ".." &&
+			currentCluster == fs.boot.RootCluster {
+			continue
+		}
+
 		records, err := fs.readDirectoryRecords(currentCluster)
 		if err != nil {
 			return 0, err
@@ -1058,6 +1063,11 @@ func (fs *Filesystem) findDirectoryCluster(path string) (uint32, error) {
 				"%q is not a directory",
 				component,
 			)
+		}
+
+		if component == ".." && found.StartCluster == 0 {
+			currentCluster = fs.boot.RootCluster
+			continue
 		}
 
 		currentCluster = found.StartCluster

@@ -4856,3 +4856,428 @@ func TestWriteFileDotPathComponents(t *testing.T) {
 		t.Fatal("lookup returned CHILD.TXT as a directory")
 	}
 }
+
+// Ensure that .. is a supported path component
+func TestWriteFileParentDirectoryPathComponent(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("PARENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("PARENT/CHILD"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/CHILD/../FROM_PARENT.TXT",
+		[]byte("parent"),
+	); err != nil {
+		t.Fatalf(
+			"WriteFile(PARENT/CHILD/../FROM_PARENT.TXT): %v",
+			err,
+		)
+	}
+
+	content, err := fs.ReadFile(
+		"PARENT/FROM_PARENT.TXT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("parent")) {
+		t.Fatalf(
+			"FROM_PARENT.TXT contents = %q, want %q",
+			content,
+			"parent",
+		)
+	}
+}
+
+// Traversal through GRANDCHILD/../.. correctly returns to PARENT,
+// rather than merely proving that a single .. works.
+func TestWriteFileMultipleParentDirectoryPathComponents(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("PARENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("PARENT/CHILD"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("PARENT/CHILD/GRANDCHILD"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/CHILD/GRANDCHILD/../../ROOT.TXT",
+		[]byte("parent"),
+	); err != nil {
+		t.Fatalf(
+			"WriteFile with multiple .. components: %v",
+			err,
+		)
+	}
+
+	content, err := fs.ReadFile(
+		"PARENT/ROOT.TXT",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("parent")) {
+		t.Fatalf(
+			"ROOT.TXT contents = %q, want %q",
+			content,
+			"parent",
+		)
+	}
+}
+
+// The first write intentionally checks that a component named .... is treated
+// as a normal directory name and therefore fails because it doesn't exist.
+// The second verifies that PARENT/CHILD/../.. ultimately resolves to the
+// root directory.
+func TestWriteFileParentOfRootDirectory(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("PARENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("PARENT/CHILD"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/CHILD/../..../INVALID.TXT",
+		[]byte("invalid"),
+	); err == nil {
+		t.Fatal("WriteFile unexpectedly accepted malformed parent path")
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/CHILD/../../ROOT.TXT",
+		[]byte("root"),
+	); err != nil {
+		t.Fatalf(
+			"WriteFile through root-level ..: %v",
+			err,
+		)
+	}
+
+	content, err := fs.ReadFile("ROOT.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("root")) {
+		t.Fatalf(
+			"ROOT.TXT contents = %q, want %q",
+			content,
+			"root",
+		)
+	}
+}
+
+// Traversal above root
+func TestWriteFileParentTraversalAboveRootStaysAtRoot(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.WriteFile(
+		"../../ROOT.TXT",
+		[]byte("root"),
+	); err != nil {
+		t.Fatalf(
+			"WriteFile through root traversal: %v",
+			err,
+		)
+	}
+
+	content, err := fs.ReadFile("ROOT.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("root")) {
+		t.Fatalf(
+			"ROOT.TXT contents = %q, want %q",
+			content,
+			"root",
+		)
+	}
+}
+
+// Case-insensitive lookup
+func TestReadFileIsCaseInsensitive(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	const filename = "Example.TXT"
+
+	if err := fs.WriteFile(
+		filename,
+		[]byte("hello"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := fs.ReadFile("example.txt")
+	if err != nil {
+		t.Fatalf(
+			"ReadFile with different case: %v",
+			err,
+		)
+	}
+
+	if !bytes.Equal(content, []byte("hello")) {
+		t.Fatalf(
+			"file contents = %q, want %q",
+			content,
+			"hello",
+		)
+	}
+}

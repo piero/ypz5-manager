@@ -54,7 +54,7 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 		found := false
 
 		for _, entry := range entries {
-			if entry.Name != part {
+			if !strings.EqualFold(entry.Name, part) {
 				continue
 			}
 
@@ -137,7 +137,7 @@ func (fs *Filesystem) findDirectoryRecord(
 		found := false
 
 		for _, record := range records {
-			if record.Entry.Name != part {
+			if !strings.EqualFold(record.Entry.Name, part) {
 				continue
 			}
 
