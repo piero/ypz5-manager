@@ -14,7 +14,22 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 		}, nil
 	}
 
-	path = strings.Trim(path, "/")
+	if path == "" {
+		return DirectoryEntry{
+			Name:         "/",
+			IsDir:        true,
+			StartCluster: fs.RootCluster(),
+		}, nil
+	}
+
+	if strings.HasSuffix(path, "/") {
+		return DirectoryEntry{}, fmt.Errorf(
+			"path has trailing separator: %q",
+			path,
+		)
+	}
+
+	path = strings.TrimPrefix(path, "/")
 
 	if path == "" {
 		return DirectoryEntry{

@@ -1583,3 +1583,219 @@ func TestMkdirExpandsSubdirectory(t *testing.T) {
 		)
 	}
 }
+
+// Mkdir with .. in the parent path
+func TestMkdirParentDirectoryPathComponent(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("A"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("A/B"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir(
+		"A/B/../C",
+	); err != nil {
+		t.Fatalf(
+			"Mkdir with parent directory component: %v",
+			err,
+		)
+	}
+
+	if _, err := fs.findEntry("A/C"); err != nil {
+		t.Fatalf(
+			"created directory A/C not found: %v",
+			err,
+		)
+	}
+}
+
+func TestMkdirParentTraversalAboveRootStaysAtRoot(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir(
+		"../../NewDir",
+	); err != nil {
+		t.Fatalf(
+			"Mkdir with traversal above root: %v",
+			err,
+		)
+	}
+
+	entry, err := fs.findEntry("NewDir")
+	if err != nil {
+		t.Fatalf(
+			"created root directory not found: %v",
+			err,
+		)
+	}
+
+	if !entry.IsDir {
+		t.Fatal("NewDir is not a directory")
+	}
+}
+
+func TestMkdirEmptyPathComponentDoesNotMutate(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	before := append([]byte(nil), buffer.data...)
+
+	if err := fs.Mkdir("Dir//Sub"); err == nil {
+		t.Fatal("Mkdir accepted an empty path component")
+	}
+
+	if !bytes.Equal(buffer.data, before) {
+		t.Fatal("Mkdir modified the filesystem after invalid path")
+	}
+
+	if _, err := fs.findEntry("Dir"); err == nil {
+		t.Fatal("Dir was created after invalid Mkdir")
+	}
+}
