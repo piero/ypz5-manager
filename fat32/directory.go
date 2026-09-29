@@ -972,10 +972,11 @@ func splitFilePath(path string) (string, string, error) {
 		return "", "", fmt.Errorf("empty path")
 	}
 
-	path = strings.TrimSuffix(path, "/")
-
-	if path == "" {
-		return "", "", fmt.Errorf("invalid file path")
+	if strings.HasSuffix(path, "/") {
+		return "", "", fmt.Errorf(
+			"path has trailing separator: %q",
+			path,
+		)
 	}
 
 	index := strings.LastIndex(path, "/")
@@ -992,7 +993,10 @@ func splitFilePath(path string) (string, string, error) {
 	}
 
 	if name == "" {
-		return "", "", fmt.Errorf("path has no filename: %q", path)
+		return "", "", fmt.Errorf(
+			"path has no filename: %q",
+			path,
+		)
 	}
 
 	return parent, name, nil
@@ -1005,14 +1009,24 @@ func (fs *Filesystem) findDirectoryCluster(path string) (uint32, error) {
 	}
 
 	path = strings.Trim(path, "/")
+
 	if path == "" {
 		return fs.boot.RootCluster, nil
 	}
 
 	currentCluster := fs.boot.RootCluster
 
-	for _, component := range strings.Split(path, "/") {
-		if component == "" || component == "." {
+	components := strings.Split(path, "/")
+
+	for _, component := range components {
+		if component == "" {
+			return 0, fmt.Errorf(
+				"path contains an empty component: %q",
+				path,
+			)
+		}
+
+		if component == "." {
 			continue
 		}
 

@@ -4646,3 +4646,213 @@ func TestWriteFileInNewDirectory(t *testing.T) {
 		t.Fatal("'..' entry was overwritten")
 	}
 }
+
+// Invalid WriteFile paths must not mutate.
+func TestWriteFileInvalidPathDoesNotMutate(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	invalidPaths := []string{
+		"",
+		"/",
+		"///",
+		"dir/",
+		"/dir/",
+		"dir//file.txt",
+	}
+
+	for _, path := range invalidPaths {
+		before := append([]byte(nil), data...)
+
+		if err := fs.WriteFile(path, []byte("data")); err == nil {
+			t.Fatalf(
+				"WriteFile(%q) unexpectedly succeeded",
+				path,
+			)
+		}
+
+		if !bytes.Equal(data, before) {
+			t.Fatalf(
+				"WriteFile(%q) mutated the image after failure",
+				path,
+			)
+		}
+	}
+}
+
+// Ensure that . is a supported path component
+func TestWriteFileDotPathComponents(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.WriteFile(
+		"./ROOT.TXT",
+		[]byte("root"),
+	); err != nil {
+		t.Fatalf("WriteFile(./ROOT.TXT): %v", err)
+	}
+
+	content, err := fs.ReadFile("./ROOT.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("root")) {
+		t.Fatalf(
+			"ROOT.TXT contents = %q, want %q",
+			content,
+			"root",
+		)
+	}
+
+	if err := fs.Mkdir("PARENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile(
+		"PARENT/./CHILD.TXT",
+		[]byte("child"),
+	); err != nil {
+		t.Fatalf(
+			"WriteFile(PARENT/./CHILD.TXT): %v",
+			err,
+		)
+	}
+
+	content, err = fs.ReadFile("PARENT/CHILD.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("child")) {
+		t.Fatalf(
+			"CHILD.TXT contents = %q, want %q",
+			content,
+			"child",
+		)
+	}
+
+	content, err = fs.ReadFile("./PARENT/./CHILD.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, []byte("child")) {
+		t.Fatalf(
+			"CHILD.TXT contents through dot path = %q, want %q",
+			content,
+			"child",
+		)
+	}
+
+	entry, err := fs.Lookup("./PARENT/./CHILD.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry.Name != "CHILD.TXT" {
+		t.Fatalf(
+			"lookup name = %q, want %q",
+			entry.Name,
+			"CHILD.TXT",
+		)
+	}
+
+	if entry.IsDir {
+		t.Fatal("lookup returned CHILD.TXT as a directory")
+	}
+}

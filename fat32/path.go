@@ -14,7 +14,34 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 		}, nil
 	}
 
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	path = strings.Trim(path, "/")
+
+	if path == "" {
+		return DirectoryEntry{
+			Name:         "/",
+			IsDir:        true,
+			StartCluster: fs.RootCluster(),
+		}, nil
+	}
+
+	rawParts := strings.Split(path, "/")
+	parts := make([]string, 0, len(rawParts))
+
+	for _, part := range rawParts {
+		if part == "" || part == "." {
+			continue
+		}
+
+		parts = append(parts, part)
+	}
+
+	if len(parts) == 0 {
+		return DirectoryEntry{
+			Name:         "/",
+			IsDir:        true,
+			StartCluster: fs.RootCluster(),
+		}, nil
+	}
 
 	currentCluster := fs.RootCluster()
 
@@ -31,7 +58,6 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 				continue
 			}
 
-			// Every component except the final one must be a directory.
 			if i < len(parts)-1 && !entry.IsDir {
 				return DirectoryEntry{}, fmt.Errorf(
 					"%q is not a directory",
@@ -39,7 +65,6 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 				)
 			}
 
-			// We found the requested entry.
 			if i == len(parts)-1 {
 				return entry, nil
 			}
@@ -57,19 +82,49 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 		}
 	}
 
-	return DirectoryEntry{}, fmt.Errorf("invalid path: %q", path)
+	return DirectoryEntry{}, fmt.Errorf(
+		"invalid path: %q",
+		path,
+	)
 }
 
 func (fs *Filesystem) Lookup(path string) (DirectoryEntry, error) {
 	return fs.findEntry(path)
 }
 
-func (fs *Filesystem) findDirectoryRecord(path string) (directoryRecord, error) {
+func (fs *Filesystem) findDirectoryRecord(
+	path string,
+) (directoryRecord, error) {
 	if path == "/" {
-		return directoryRecord{}, fmt.Errorf("root directory has no directory entry")
+		return directoryRecord{}, fmt.Errorf(
+			"root directory has no directory entry",
+		)
 	}
 
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	path = strings.Trim(path, "/")
+
+	if path == "" {
+		return directoryRecord{}, fmt.Errorf(
+			"root directory has no directory entry",
+		)
+	}
+
+	rawParts := strings.Split(path, "/")
+	parts := make([]string, 0, len(rawParts))
+
+	for _, part := range rawParts {
+		if part == "" || part == "." {
+			continue
+		}
+
+		parts = append(parts, part)
+	}
+
+	if len(parts) == 0 {
+		return directoryRecord{}, fmt.Errorf(
+			"root directory has no directory entry",
+		)
+	}
 
 	currentCluster := fs.RootCluster()
 
@@ -110,7 +165,10 @@ func (fs *Filesystem) findDirectoryRecord(path string) (directoryRecord, error) 
 		}
 	}
 
-	return directoryRecord{}, fmt.Errorf("invalid path: %q", path)
+	return directoryRecord{}, fmt.Errorf(
+		"invalid path: %q",
+		path,
+	)
 }
 
 // func (fs *Filesystem) LookupRecord(path string) (directoryRecord, error) {
