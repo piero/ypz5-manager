@@ -2441,3 +2441,839 @@ func TestDeleteLongFilenameAcrossDirectoryClusterBoundary(t *testing.T) {
 		)
 	}
 }
+
+// Reuse a cross-cluster deleted LFN record.
+// The free run begins in one directory cluster and continues into the next.
+func TestDeleteLongFilenameAcrossDirectoryClusterBoundaryReusesSlots(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster   = uint32(2)
+		secondCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		secondCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(secondCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	// Occupy the first 14 directory slots. The remaining two slots
+	// in the first cluster are free, forcing a sufficiently long LFN
+	// record to cross into the second cluster.
+	for i := 0; i < 14; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		shortName, err := encodeShortName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entry := encodeDirectoryEntry(
+			shortName,
+			0x20,
+			0,
+			0,
+		)
+
+		offset := int(dataOffset) + i*32
+
+		copy(
+			data[offset:offset+32],
+			entry[:],
+		)
+	}
+
+	data[int(dataOffset)+14*32] = 0xE5
+	data[int(dataOffset)+15*32] = 0xE5
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	name := "This is a filename that crosses the directory cluster boundary.txt"
+
+	if err := fs.WriteFile(
+		name,
+		[]byte("content"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("long filename was not created")
+	}
+
+	if len(record.LFN) < 2 {
+		t.Fatalf(
+			"LFN entry count = %d, want at least 2",
+			len(record.LFN),
+		)
+	}
+
+	locations := make(
+		[]directoryEntryLocation,
+		0,
+		len(record.LFN)+1,
+	)
+
+	locations = append(locations, record.LFN...)
+	locations = append(locations, record.Short)
+
+	crossesBoundary := false
+
+	for _, location := range locations {
+		if location.Cluster == secondCluster {
+			crossesBoundary = true
+			break
+		}
+	}
+
+	if !crossesBoundary {
+		t.Fatal(
+			"long filename record does not cross the directory cluster boundary",
+		)
+	}
+
+	originalEntryCount := len(locations)
+
+	if err := fs.Delete(name); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same UTF-16 length as the original filename, but a different
+	// name, so it requires exactly the same number of LFN entries.
+	replacementName := "That is a filename that crosses the directory cluster boundary.txt"
+
+	if len([]rune(replacementName)) != len([]rune(name)) {
+		t.Fatalf(
+			"replacement filename length = %d runes, want %d",
+			len([]rune(replacementName)),
+			len([]rune(name)),
+		)
+	}
+
+	if err := fs.WriteFile(
+		replacementName,
+		[]byte("replacement"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := fs.findDirectoryEntry(
+		rootCluster,
+		replacementName,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if replacement == nil {
+		t.Fatal("replacement file was not created")
+	}
+
+	replacementLocations := make(
+		[]directoryEntryLocation,
+		0,
+		len(replacement.LFN)+1,
+	)
+
+	replacementLocations = append(
+		replacementLocations,
+		replacement.LFN...,
+	)
+	replacementLocations = append(
+		replacementLocations,
+		replacement.Short,
+	)
+
+	if len(replacementLocations) != originalEntryCount {
+		t.Fatalf(
+			"replacement entry count = %d, want %d",
+			len(replacementLocations),
+			originalEntryCount,
+		)
+	}
+
+	// The replacement must reuse exactly the physical slots that
+	// were occupied by the deleted record.
+	for i := range locations {
+		if replacementLocations[i] != locations[i] {
+			t.Fatalf(
+				"replacement entry %d at cluster %d offset %d, want cluster %d offset %d",
+				i,
+				replacementLocations[i].Cluster,
+				replacementLocations[i].Offset,
+				locations[i].Cluster,
+				locations[i].Offset,
+			)
+		}
+	}
+}
+
+// Replace a file in an expanded directory.
+// Check that ReplaceFile can update the short directory entry
+// in a continuation cluster, while preserving its physical
+// directory location and correctly replacing/freeing the data chain.
+func TestReplaceFileInExpandedDirectory(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	// Fill the first root-directory cluster.
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		if err := fs.WriteFile(
+			name,
+			[]byte("content"),
+		); err != nil {
+			t.Fatalf(
+				"WriteFile(%q): %v",
+				name,
+				err,
+			)
+		}
+	}
+
+	name := "TARGET.TXT"
+
+	if err := fs.WriteFile(
+		name,
+		[]byte("initial content"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("TARGET.TXT was not created")
+	}
+
+	if record.Short.Cluster == rootCluster {
+		t.Fatal(
+			"TARGET.TXT is still in the first directory cluster; " +
+				"test did not exercise expanded-directory replacement",
+		)
+	}
+
+	oldStartCluster := record.Entry.StartCluster
+
+	replacement := []byte(
+		"replacement content that is longer than the original",
+	)
+
+	if err := fs.ReplaceFile(name, replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err = fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("TARGET.TXT disappeared after replacement")
+	}
+
+	if record.Short.Cluster == rootCluster {
+		t.Fatal(
+			"TARGET.TXT moved to the first directory cluster",
+		)
+	}
+
+	if record.Entry.Size != uint32(len(replacement)) {
+		t.Fatalf(
+			"file size = %d, want %d",
+			record.Entry.Size,
+			len(replacement),
+		)
+	}
+
+	content, err := fs.readFile(record.Entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, replacement) {
+		t.Fatalf(
+			"file contents = %q, want %q",
+			content,
+			replacement,
+		)
+	}
+
+	if record.Entry.StartCluster == oldStartCluster {
+		t.Fatal(
+			"replacement unexpectedly reused old data cluster",
+		)
+	}
+
+	free, err := fs.IsFreeCluster(oldStartCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !free {
+		t.Fatalf(
+			"old data cluster %d is still allocated",
+			oldStartCluster,
+		)
+	}
+}
+
+// Replace a long filename in an expanded directory.
+// Replacement is data-only: the LFN entries and their physical locations
+// remain untouched, while the short entry's cluster/size fields are updated.
+func TestReplaceLongFilenameInExpandedDirectory(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	// Fill the first root-directory cluster so that the target
+	// long filename must be placed in the expanded cluster.
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("FILE%02d.TXT", i)
+
+		if err := fs.WriteFile(
+			name,
+			[]byte("content"),
+		); err != nil {
+			t.Fatalf(
+				"WriteFile(%q): %v",
+				name,
+				err,
+			)
+		}
+	}
+
+	name := "This is a long filename in an expanded directory.txt"
+
+	initial := []byte("initial content")
+
+	if err := fs.WriteFile(name, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("long filename was not created")
+	}
+
+	if len(record.LFN) == 0 {
+		t.Fatal("long filename has no LFN entries")
+	}
+
+	if record.Short.Cluster == rootCluster {
+		t.Fatal(
+			"long filename is still in the first directory cluster; " +
+				"test did not exercise expanded-directory replacement",
+		)
+	}
+
+	originalShortLocation := record.Short
+
+	originalLFNLocations := append(
+		[]directoryEntryLocation(nil),
+		record.LFN...,
+	)
+
+	replacement := []byte(
+		"replacement content that is longer",
+	)
+
+	if err := fs.ReplaceFile(name, replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err = fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("long filename disappeared after replacement")
+	}
+
+	if len(record.LFN) != len(originalLFNLocations) {
+		t.Fatalf(
+			"LFN entry count = %d, want %d",
+			len(record.LFN),
+			len(originalLFNLocations),
+		)
+	}
+
+	if record.Short != originalShortLocation {
+		t.Fatalf(
+			"short entry moved from cluster %d offset %d to cluster %d offset %d",
+			originalShortLocation.Cluster,
+			originalShortLocation.Offset,
+			record.Short.Cluster,
+			record.Short.Offset,
+		)
+	}
+
+	for i := range originalLFNLocations {
+		if record.LFN[i] != originalLFNLocations[i] {
+			t.Fatalf(
+				"LFN entry %d moved from cluster %d offset %d to cluster %d offset %d",
+				i,
+				originalLFNLocations[i].Cluster,
+				originalLFNLocations[i].Offset,
+				record.LFN[i].Cluster,
+				record.LFN[i].Offset,
+			)
+		}
+	}
+
+	if record.Entry.Size != uint32(len(replacement)) {
+		t.Fatalf(
+			"file size = %d, want %d",
+			record.Entry.Size,
+			len(replacement),
+		)
+	}
+
+	content, err := fs.readFile(record.Entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(content, replacement) {
+		t.Fatalf(
+			"file contents = %q, want %q",
+			content,
+			replacement,
+		)
+	}
+}
+
+// Replacing an empty file with another empty file.
+// This should update nothing in the FAT and should leave the directory entry valid.
+// ReplaceFile should not unnecessarily allocate a temporary cluster chain
+// when both the old and new files have size zero.
+func TestReplaceEmptyFileWithEmptyFile(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	const name = "EMPTY.TXT"
+
+	if err := fs.WriteFile(name, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("empty file was not created")
+	}
+
+	if record.Entry.StartCluster != 0 {
+		t.Fatalf(
+			"empty file start cluster = %d, want 0",
+			record.Entry.StartCluster,
+		)
+	}
+
+	before := append([]byte(nil), data...)
+
+	if err := fs.ReplaceFile(name, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err = fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("empty file disappeared after replacement")
+	}
+
+	if record.Entry.Size != 0 {
+		t.Fatalf(
+			"file size = %d, want 0",
+			record.Entry.Size,
+		)
+	}
+
+	if record.Entry.StartCluster != 0 {
+		t.Fatalf(
+			"empty file start cluster = %d, want 0",
+			record.Entry.StartCluster,
+		)
+	}
+
+	content, err := fs.readFile(record.Entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(content) != 0 {
+		t.Fatalf(
+			"file contents length = %d, want 0",
+			len(content),
+		)
+	}
+
+	// No FAT or directory data should have changed.
+	if !bytes.Equal(data, before) {
+		t.Fatal("replacing an empty file with an empty file mutated the image")
+	}
+}
+
+// Non empty -> empty replacement/
+// Allocation of no new clusters and freeing the entire old chain
+// after the directory entry is committed.
+func TestReplaceFileWithEmptyFileFreesOldChain(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	const name = "DATA.TXT"
+
+	initial := bytes.Repeat([]byte("A"), 700)
+
+	if err := fs.WriteFile(name, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("file was not created")
+	}
+
+	oldChain, err := fs.ClusterChain(record.Entry.StartCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(oldChain) != 2 {
+		t.Fatalf(
+			"old cluster chain length = %d, want 2",
+			len(oldChain),
+		)
+	}
+
+	if err := fs.ReplaceFile(name, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err = fs.findDirectoryEntry(
+		rootCluster,
+		name,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if record == nil {
+		t.Fatal("file disappeared after replacement")
+	}
+
+	if record.Entry.Size != 0 {
+		t.Fatalf(
+			"file size = %d, want 0",
+			record.Entry.Size,
+		)
+	}
+
+	if record.Entry.StartCluster != 0 {
+		t.Fatalf(
+			"file start cluster = %d, want 0",
+			record.Entry.StartCluster,
+		)
+	}
+
+	content, err := fs.readFile(record.Entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(content) != 0 {
+		t.Fatalf(
+			"file contents length = %d, want 0",
+			len(content),
+		)
+	}
+
+	for _, cluster := range oldChain {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !free {
+			t.Fatalf(
+				"old cluster %d is still allocated",
+				cluster,
+			)
+		}
+	}
+}
