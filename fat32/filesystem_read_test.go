@@ -653,3 +653,766 @@ func TestReadFileNonexistentDoesNotMutate(t *testing.T) {
 		t.Fatal("ReadFile modified the filesystem")
 	}
 }
+
+func TestReadFileParentFileIsRejected(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.WriteFile("file.txt", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+
+	before := append([]byte(nil), buffer.data...)
+
+	if _, err := fs.ReadFile("file.txt/child.txt"); err == nil {
+		t.Fatal("ReadFile accepted a file as a parent directory")
+	}
+
+	if !bytes.Equal(buffer.data, before) {
+		t.Fatal("ReadFile modified the filesystem")
+	}
+}
+
+func TestReadFileRootDirectoryIsRejected(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	for _, path := range []string{".", "/"} {
+		before := append([]byte(nil), buffer.data...)
+
+		if _, err := fs.ReadFile(path); err == nil {
+			t.Fatalf("ReadFile accepted root directory path %q", path)
+		}
+
+		if !bytes.Equal(buffer.data, before) {
+			t.Fatalf(
+				"ReadFile modified the filesystem for path %q",
+				path,
+			)
+		}
+	}
+}
+
+// Read a multi-cluster file with non-cluster-aligned size
+func TestReadFileTrimsFinalClusterToFileSize(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	content := bytes.Repeat([]byte("x"), int(sectorSize)+17)
+
+	if err := fs.WriteFile("test.txt", content); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.ReadFile("test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != len(content) {
+		t.Fatalf(
+			"ReadFile returned %d bytes, want %d",
+			len(got),
+			len(content),
+		)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatal("ReadFile returned incorrect data")
+	}
+}
+
+func TestReadEmptyFile(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.WriteFile("empty.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.ReadFile("empty.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got == nil {
+		t.Fatal("ReadFile returned nil for an empty file")
+	}
+
+	if len(got) != 0 {
+		t.Fatalf(
+			"ReadFile returned %d bytes, want 0",
+			len(got),
+		)
+	}
+}
+
+// Corrupted FAT chain
+func TestReadFileRejectsBadCluster(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(fileCluster)*4:],
+		fat32BadCluster,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	// Root directory contains a short entry for bad.txt.
+	shortName, err := encodeShortName("bad.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		1,
+	)
+
+	copy(
+		data[int(dataOffset):int(dataOffset)+32],
+		entry[:],
+	)
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if _, err := fs.ReadFile("bad.txt"); err == nil {
+		t.Fatal("ReadFile accepted a bad-cluster FAT entry")
+	}
+}
+
+// Cyclic FAT chain
+func TestReadFileRejectsCyclicClusterChain(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster   = uint32(2)
+		firstCluster  = uint32(3)
+		secondCluster = uint32(4)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(firstCluster)*4:],
+		secondCluster,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(secondCluster)*4:],
+		firstCluster,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	shortName, err := encodeShortName("cycle.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		firstCluster,
+		uint32(sectorSize)+1,
+	)
+
+	copy(
+		data[int(dataOffset):int(dataOffset)+32],
+		entry[:],
+	)
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if _, err := fs.ReadFile("cycle.txt"); err == nil {
+		t.Fatal("ReadFile accepted a cyclic cluster chain")
+	}
+}
+
+// FAT chain ends before the declared file size
+func TestReadFileRejectsTruncatedClusterChain(t *testing.T) {
+	// Scenario: the directory entry declares 513 bytes,
+	// while its chain contains only one 512-byte cluster
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	shortName, err := encodeShortName("trunc.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		uint32(sectorSize)+1,
+	)
+
+	copy(
+		data[int(dataOffset):int(dataOffset)+32],
+		entry[:],
+	)
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if _, err := fs.ReadFile("trunc.txt"); err == nil {
+		t.Fatal("ReadFile accepted a truncated cluster chain")
+	}
+}
+
+// File size exactly matches the cluster chain
+func TestReadFileExactClusterSize(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+		fileCluster = uint32(3)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(fileCluster)*4:],
+		fat32EOF,
+	)
+
+	content := bytes.Repeat([]byte("x"), int(sectorSize))
+
+	copy(
+		data[int(dataOffset)+int(fileCluster-rootCluster)*int(sectorSize):],
+		content,
+	)
+
+	shortName, err := encodeShortName("exact.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		fileCluster,
+		uint32(len(content)),
+	)
+
+	copy(
+		data[int(dataOffset):int(dataOffset)+32],
+		entry[:],
+	)
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	got, err := fs.ReadFile("exact.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatal("ReadFile returned incorrect data")
+	}
+}
+
+// Reading a file through multiple parent directories
+func TestReadFileMultipleParentDirectories(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if err := fs.Mkdir("one"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir("one/two"); err != nil {
+		t.Fatal(err)
+	}
+
+	content := []byte("nested read")
+
+	if err := fs.WriteFile("one/two/test.txt", content); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.ReadFile("one/two/test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatal("ReadFile returned incorrect nested file data")
+	}
+}
+
+// Invalid starting cluster
+func TestReadFileRejectsInvalidStartCluster(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 160
+
+		rootCluster    = uint32(2)
+		invalidCluster = uint32(1)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	shortName, err := encodeShortName("invalid.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		invalidCluster,
+		1,
+	)
+
+	copy(
+		data[int(dataOffset):int(dataOffset)+32],
+		entry[:],
+	)
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	if _, err := fs.ReadFile("invalid.txt"); err == nil {
+		t.Fatal("ReadFile accepted an invalid starting cluster")
+	}
+}
