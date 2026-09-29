@@ -3277,3 +3277,76 @@ func TestReplaceFileWithEmptyFileFreesOldChain(t *testing.T) {
 		}
 	}
 }
+
+// Verify Delete is case-insensitive
+func TestDeleteFileIsCaseInsensitive(t *testing.T) {
+	const (
+		sectorSize        uint16 = 512
+		sectorsPerCluster uint8  = 1
+		sectorsPerFAT     uint32 = 1
+		numberOfFATs      uint8  = 1
+		totalSectors      uint32 = 80
+
+		rootCluster = uint32(2)
+	)
+
+	data := make([]byte, int(sectorSize)*int(totalSectors))
+
+	fatOffset := int64(0)
+	dataOffset := int64(sectorSize)
+
+	binary.LittleEndian.PutUint32(
+		data[int(fatOffset)+int(rootCluster)*4:],
+		fat32EOF,
+	)
+
+	boot := BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: sectorsPerCluster,
+		NumberOfFATs:      numberOfFATs,
+		SectorsPerFAT:     sectorsPerFAT,
+		TotalSectors:      totalSectors,
+		RootCluster:       rootCluster,
+	}
+
+	layout := Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: int64(sectorSize),
+	}
+
+	data[int(dataOffset)] = 0x00
+
+	buffer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: -1,
+	}
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		buffer,
+	)
+
+	fs.boot = boot
+	fs.layout = layout
+
+	const filename = "Example.TXT"
+
+	if err := fs.WriteFile(
+		filename,
+		[]byte("hello"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Delete("example.txt"); err != nil {
+		t.Fatalf(
+			"Delete with different case: %v",
+			err,
+		)
+	}
+
+	if _, err := fs.ReadFile(filename); err == nil {
+		t.Fatal("ReadFile succeeded after case-insensitive Delete")
+	}
+}
