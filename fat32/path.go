@@ -46,6 +46,46 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 	currentCluster := fs.RootCluster()
 
 	for i, part := range parts {
+		if part == ".." {
+			if currentCluster == fs.RootCluster() {
+				continue
+			}
+
+			entries, err := fs.readDirectory(currentCluster)
+			if err != nil {
+				return DirectoryEntry{}, err
+			}
+
+			var parentCluster uint32
+			found := false
+
+			for _, entry := range entries {
+				if !entry.IsDir ||
+					!strings.EqualFold(entry.Name, "..") {
+					continue
+				}
+
+				parentCluster = entry.StartCluster
+
+				if parentCluster == 0 {
+					parentCluster = fs.RootCluster()
+				}
+
+				found = true
+				break
+			}
+
+			if !found {
+				return DirectoryEntry{}, fmt.Errorf(
+					"parent directory entry not found for cluster %d",
+					currentCluster,
+				)
+			}
+
+			currentCluster = parentCluster
+			continue
+		}
+
 		entries, err := fs.readDirectory(currentCluster)
 		if err != nil {
 			return DirectoryEntry{}, err
