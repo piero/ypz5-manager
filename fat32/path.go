@@ -28,7 +28,14 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 	parts := make([]string, 0, len(rawParts))
 
 	for _, part := range rawParts {
-		if part == "" || part == "." {
+		if part == "" {
+			return DirectoryEntry{}, fmt.Errorf(
+				"path contains an empty component: %q",
+				path,
+			)
+		}
+
+		if part == "." {
 			continue
 		}
 
@@ -153,7 +160,14 @@ func (fs *Filesystem) findDirectoryRecord(
 	parts := make([]string, 0, len(rawParts))
 
 	for _, part := range rawParts {
-		if part == "" || part == "." {
+		if part == "" {
+			return directoryRecord{}, fmt.Errorf(
+				"path contains an empty component: %q",
+				path,
+			)
+		}
+
+		if part == "." {
 			continue
 		}
 
@@ -169,6 +183,46 @@ func (fs *Filesystem) findDirectoryRecord(
 	currentCluster := fs.RootCluster()
 
 	for i, part := range parts {
+		if part == ".." {
+			if currentCluster == fs.RootCluster() {
+				continue
+			}
+
+			records, err := fs.readDirectoryRecords(currentCluster)
+			if err != nil {
+				return directoryRecord{}, err
+			}
+
+			var parentCluster uint32
+			found := false
+
+			for _, record := range records {
+				if !record.Entry.IsDir ||
+					!strings.EqualFold(record.Entry.Name, "..") {
+					continue
+				}
+
+				parentCluster = record.Entry.StartCluster
+
+				if parentCluster == 0 {
+					parentCluster = fs.RootCluster()
+				}
+
+				found = true
+				break
+			}
+
+			if !found {
+				return directoryRecord{}, fmt.Errorf(
+					"parent directory entry not found for cluster %d",
+					currentCluster,
+				)
+			}
+
+			currentCluster = parentCluster
+			continue
+		}
+
 		records, err := fs.readDirectoryRecords(currentCluster)
 		if err != nil {
 			return directoryRecord{}, err
@@ -210,7 +264,3 @@ func (fs *Filesystem) findDirectoryRecord(
 		path,
 	)
 }
-
-// func (fs *Filesystem) LookupRecord(path string) (directoryRecord, error) {
-// 	return fs.findDirectoryRecord(path)
-// }

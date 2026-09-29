@@ -972,6 +972,13 @@ func splitFilePath(path string) (string, string, error) {
 		return "", "", fmt.Errorf("empty path")
 	}
 
+	if path == "/" {
+		return "", "", fmt.Errorf(
+			"path has no filename: %q",
+			path,
+		)
+	}
+
 	if strings.HasSuffix(path, "/") {
 		return "", "", fmt.Errorf(
 			"path has trailing separator: %q",
@@ -990,6 +997,23 @@ func splitFilePath(path string) (string, string, error) {
 
 	if parent == "" {
 		parent = "/"
+	} else {
+		parentParts := strings.Split(parent, "/")
+
+		for i, part := range parentParts {
+			// The first component is empty for an absolute path,
+			// e.g. "/Music/file.txt". That is valid.
+			if i == 0 && part == "" {
+				continue
+			}
+
+			if part == "" {
+				return "", "", fmt.Errorf(
+					"path contains an empty component: %q",
+					path,
+				)
+			}
+		}
 	}
 
 	if name == "" {
