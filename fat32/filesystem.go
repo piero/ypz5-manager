@@ -650,37 +650,85 @@ func (fs *Filesystem) createDirectoryRecord(
 		directoryCluster,
 		slotCount,
 	)
-	if err != nil {
-		if !errors.Is(err, errDirectoryFull) &&
-			!errors.Is(err, errDirectoryEndReached) {
-			return err
-		}
-
-		entriesPerCluster := int(
-			fs.layout.BytesPerCluster / 32,
+	if err == nil {
+		return fs.writeEncodedDirectoryRecord(
+			record,
+			slots,
 		)
-
-		clustersNeeded := (slotCount + entriesPerCluster - 1) /
-			entriesPerCluster
-
-		if err := fs.expandDirectory(
-			directoryCluster,
-			clustersNeeded,
-		); err != nil {
-			return err
-		}
-
-		slots, err = fs.findFreeDirectorySlots(
-			directoryCluster,
-			slotCount,
-		)
-		if err != nil {
-			return err
-		}
 	}
 
-	return fs.writeEncodedDirectoryRecord(
+	if !errors.Is(err, errDirectoryFull) &&
+		!errors.Is(err, errDirectoryEndReached) {
+		return err
+	}
+
+	clusters, err := fs.readClusterChain(directoryCluster)
+	if err != nil {
+		return err
+	}
+
+	if len(clusters) == 0 {
+		return fmt.Errorf("directory cluster chain is empty")
+	}
+
+	lastCluster := clusters[len(clusters)-1]
+
+	entriesPerCluster := int(
+		fs.layout.BytesPerCluster / 32,
+	)
+
+	clustersNeeded := (slotCount + entriesPerCluster - 1) /
+		entriesPerCluster
+
+	if err := fs.expandDirectory(
+		directoryCluster,
+		clustersNeeded,
+	); err != nil {
+		return err
+	}
+
+	expandedClusters, err := fs.readClusterChain(directoryCluster)
+	if err != nil {
+		return err
+	}
+
+	if len(expandedClusters) <= len(clusters) {
+		return fmt.Errorf(
+			"directory expansion did not add clusters",
+		)
+	}
+
+	newStartCluster := expandedClusters[len(clusters)]
+
+	rollbackExpansion := func(original error) error {
+		var rollbackErr error
+
+		if err := fs.writeFATEntry(lastCluster, fat32EOF); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+			return errors.Join(original, rollbackErr)
+		}
+
+		if err := fs.freeClusterChain(newStartCluster); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+
+		return errors.Join(original, rollbackErr)
+	}
+
+	slots, err = fs.findFreeDirectorySlots(
+		directoryCluster,
+		slotCount,
+	)
+	if err != nil {
+		return rollbackExpansion(err)
+	}
+
+	if err := fs.writeEncodedDirectoryRecord(
 		record,
 		slots,
-	)
+	); err != nil {
+		return rollbackExpansion(err)
+	}
+
+	return nil
 }

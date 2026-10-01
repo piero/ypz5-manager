@@ -5203,3 +5203,122 @@ func TestWriteFileParentTraversalAboveRootStaysAtRoot(t *testing.T) {
 		)
 	}
 }
+
+// Test that a directory-record write failure after expansion rolls back the expansion.
+func TestWriteFileDirectoryRecordFailureAfterExpansionRollsBack(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+5*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	// Fill the root directory except for the final end-of-directory entry.
+	for offset := 0; offset < bytesPerCluster-32; offset += 32 {
+		data[dataOffset+offset] = 0x41
+	}
+
+	data[dataOffset+bytesPerCluster-32] = 0x00
+
+	// The first file-data cluster is 3. The expanded directory cluster is 4.
+	// Fail only when the new file's directory entry is written.
+	newDirectoryCluster := uint32(4)
+	directoryWriteOffset := int64(
+		dataOffset + int(newDirectoryCluster-2)*bytesPerCluster,
+	)
+
+	writer := &failOnWriteCountAt{
+		data:       data,
+		failOffset: directoryWriteOffset,
+		failCount:  2,
+	}
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		writer: writer,
+		boot: BootSector{
+			BytesPerSector:    sectorSize,
+			SectorsPerCluster: 1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      7,
+			RootCluster:       rootCluster,
+		},
+		layout: Layout{
+			FATOffset:       fatOffset,
+			DataOffset:      dataOffset,
+			BytesPerCluster: bytesPerCluster,
+		},
+	}
+
+	err := fs.WriteFile(
+		"A long filename.txt",
+		[]byte("data"),
+	)
+	if err == nil {
+		t.Fatal("WriteFile unexpectedly succeeded")
+	}
+
+	// The root directory must still be a single-cluster chain.
+	nextCluster, err := fs.readFATEntry(rootCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if nextCluster != fat32EOF {
+		t.Fatalf(
+			"root directory chain changed: next cluster = %d, want EOF",
+			nextCluster,
+		)
+	}
+
+	// The expanded directory cluster must have been released.
+	value, err := fs.readFATEntry(newDirectoryCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if value != 0 {
+		t.Fatalf(
+			"expanded directory cluster %d FAT entry = %#x, want free",
+			newDirectoryCluster,
+			value,
+		)
+	}
+
+	// The file-data cluster allocated before directory creation must also be free.
+	fileDataCluster := uint32(3)
+
+	value, err = fs.readFATEntry(fileDataCluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if value != 0 {
+		t.Fatalf(
+			"file data cluster %d FAT entry = %#x, want free",
+			fileDataCluster,
+			value,
+		)
+	}
+
+	entry, err := fs.findDirectoryEntry(
+		rootCluster,
+		"A long filename.txt",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry != nil {
+		t.Fatal("failed WriteFile left a directory entry behind")
+	}
+}

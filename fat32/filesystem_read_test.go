@@ -3360,3 +3360,404 @@ func TestFileReadAllTrimsFinalClusterToFileSize(t *testing.T) {
 		)
 	}
 }
+
+// Test that an LFN sequence without the last-entry flag is rejected.
+func TestReadDirectoryRejectsLFNWithoutLastFlag(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+2*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	shortName, err := encodeShortName("FILE.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// LFN entry with sequence 1 but without the 0x40 last-entry flag.
+	data[dataOffset] = 0x01
+	data[dataOffset+0x0B] = 0x0F
+	data[dataOffset+0x0D] = shortNameChecksum(shortName[:])
+
+	// Following short entry.
+	entry := encodeDirectoryEntry(shortName, 0x20, 0, 0)
+	copy(data[dataOffset+32:dataOffset+64], entry[:])
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		&writerAtBuffer{data: data},
+	)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      3,
+		RootCluster:       rootCluster,
+	}
+
+	fs.layout = Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerCluster,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN without last-entry flag")
+	}
+}
+
+// Test that an LFN sequence with a missing sequence number is rejected.
+func TestReadDirectoryRejectsLFNWithMissingSequence(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+2*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	shortName, err := encodeShortName("FILE.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Last LFN entry claims sequence 2, but sequence 1 is missing.
+	data[dataOffset] = 0x42
+	data[dataOffset+0x0B] = 0x0F
+	data[dataOffset+0x0D] = shortNameChecksum(shortName[:])
+
+	// Following short entry.
+	entry := encodeDirectoryEntry(shortName, 0x20, 0, 0)
+	copy(data[dataOffset+32:dataOffset+64], entry[:])
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		&writerAtBuffer{data: data},
+	)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      3,
+		RootCluster:       rootCluster,
+	}
+
+	fs.layout = Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerCluster,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with missing sequence")
+	}
+}
+
+// Test that duplicate LFN sequence numbers are rejected.
+func TestReadDirectoryRejectsLFNWithDuplicateSequence(t *testing.T) {
+	const (
+		sectorSize      = 512
+		bytesPerCluster = 512
+		fatOffset       = 0
+		dataOffset      = 512
+		rootCluster     = uint32(2)
+	)
+
+	data := make([]byte, dataOffset+2*bytesPerCluster)
+
+	binary.LittleEndian.PutUint32(
+		data[fatOffset+rootCluster*4:],
+		fat32EOF,
+	)
+
+	shortName, err := encodeShortName("FILE.TXT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checksum := shortNameChecksum(shortName[:])
+
+	// Last LFN entry claims sequence 2.
+	data[dataOffset] = 0x42
+	data[dataOffset+0x0B] = 0x0F
+	data[dataOffset+0x0D] = checksum
+
+	// Second entry incorrectly repeats sequence 2.
+	data[dataOffset+32] = 0x02
+	data[dataOffset+32+0x0B] = 0x0F
+	data[dataOffset+32+0x0D] = checksum
+
+	// Following short entry.
+	entry := encodeDirectoryEntry(shortName, 0x20, 0, 0)
+	copy(data[dataOffset+64:dataOffset+96], entry[:])
+
+	fs := NewReadWrite(
+		bytes.NewReader(data),
+		&writerAtBuffer{data: data},
+	)
+
+	fs.boot = BootSector{
+		BytesPerSector:    sectorSize,
+		SectorsPerCluster: 1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      3,
+		RootCluster:       rootCluster,
+	}
+
+	fs.layout = Layout{
+		FATOffset:       fatOffset,
+		DataOffset:      dataOffset,
+		BytesPerCluster: bytesPerCluster,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted duplicate LFN sequence")
+	}
+}
+
+// This test rejects an LFN entry with reserved sequence bit 5 set.
+func TestReadDirectoryRejectsLFNWithReservedSequenceBit(t *testing.T) {
+	var shortName [11]byte
+	copy(shortName[:], []byte("TEST    TXT"))
+
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, []uint16{'T'}, checksum)
+	if err != nil {
+		t.Fatalf("encodeLFNEntryUnits: %v", err)
+	}
+
+	lfn[0] |= 0x20
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	// Cluster 2 is the root directory. The FAT entry for cluster 2
+	// must point to EOF, and the directory data belongs at DataOffset.
+	data := make([]byte, 1024+4096)
+
+	binary.LittleEndian.PutUint32(data[512+2*4:512+2*4+4], fat32EOF)
+
+	copy(data[1024:1024+32], lfn[:])
+	copy(data[1024+32:1024+64], entry[:])
+
+	reader := bytes.NewReader(data)
+	writer := &writerAtBuffer{data: append([]byte(nil), data...)}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with reserved sequence bit")
+	}
+}
+
+// This test rejects an LFN entry with reserved sequence bit 7 set.
+func TestReadDirectoryRejectsLFNWithHighReservedSequenceBit(t *testing.T) {
+	var shortName [11]byte
+	copy(shortName[:], []byte("TEST    TXT"))
+
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, []uint16{'T'}, checksum)
+	if err != nil {
+		t.Fatalf("encodeLFNEntryUnits: %v", err)
+	}
+
+	lfn[0] |= 0x80
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	// Cluster 2 is the root directory. The FAT entry for cluster 2
+	// must point to EOF, and the directory data belongs at DataOffset.
+	data := make([]byte, 1024+4096)
+
+	binary.LittleEndian.PutUint32(data[512+2*4:512+2*4+4], fat32EOF)
+
+	copy(data[1024:1024+32], lfn[:])
+	copy(data[1024+32:1024+64], entry[:])
+
+	reader := bytes.NewReader(data)
+	writer := &writerAtBuffer{data: append([]byte(nil), data...)}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with high reserved sequence bit")
+	}
+}
+
+// This test rejects an LFN entry with sequence number zero.
+func TestReadDirectoryRejectsLFNWithZeroSequence(t *testing.T) {
+	var shortName [11]byte
+	copy(shortName[:], []byte("TEST    TXT"))
+
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x40, []uint16{'T'}, checksum)
+	if err != nil {
+		t.Fatalf("encodeLFNEntryUnits: %v", err)
+	}
+
+	lfn[0] = 0x40
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	data := make([]byte, 1024+4096)
+
+	binary.LittleEndian.PutUint32(
+		data[512+2*4:512+2*4+4],
+		fat32EOF,
+	)
+
+	copy(data[1024:1024+32], lfn[:])
+	copy(data[1024+32:1024+64], entry[:])
+
+	reader := bytes.NewReader(data)
+	writer := &writerAtBuffer{data: append([]byte(nil), data...)}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with zero sequence")
+	}
+}
+
+// This test rejects an LFN sequence with the last-entry flag on a later entry.
+func TestReadDirectoryRejectsLFNWithUnexpectedLastFlag(t *testing.T) {
+	var shortName [11]byte
+	copy(shortName[:], []byte("TEST    TXT"))
+
+	checksum := shortNameChecksum(shortName[:])
+
+	first, err := encodeLFNEntryUnits(0x42, []uint16{'A'}, checksum)
+	if err != nil {
+		t.Fatalf("encodeLFNEntryUnits first: %v", err)
+	}
+
+	second, err := encodeLFNEntryUnits(0x41, []uint16{'B'}, checksum)
+	if err != nil {
+		t.Fatalf("encodeLFNEntryUnits second: %v", err)
+	}
+
+	// The first entry has the correct last-entry flag. The second
+	// entry incorrectly has it as well.
+	second[0] |= 0x40
+
+	entry := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	data := make([]byte, 1024+4096)
+
+	binary.LittleEndian.PutUint32(
+		data[512+2*4:512+2*4+4],
+		fat32EOF,
+	)
+
+	copy(data[1024:1024+32], first[:])
+	copy(data[1024+32:1024+64], second[:])
+	copy(data[1024+64:1024+96], entry[:])
+
+	reader := bytes.NewReader(data)
+	writer := &writerAtBuffer{data: append([]byte(nil), data...)}
+
+	fs := NewReadWrite(reader, writer)
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	if _, err := fs.ReadRootDirectory(); err == nil {
+		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with unexpected last-entry flag")
+	}
+}

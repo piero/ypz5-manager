@@ -2,6 +2,7 @@ package fat32
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -989,5 +990,100 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 			output,
 			replacement,
 		)
+	}
+}
+
+func TestYPZ5FATCopiesStayInSync(t *testing.T) {
+	_, fs := openYPZ5WriteImage(t)
+
+	const path = "/Music/Cartoni animati/YPZ5 FAT copy test.txt"
+
+	content := []byte("FAT copy synchronization test")
+
+	if err := fs.WriteFile(path, content); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entry, err := fs.Lookup(path)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	chain, err := fs.ClusterChain(entry.StartCluster)
+	if err != nil {
+		t.Fatalf("ClusterChain: %v", err)
+	}
+
+	// Verify that every cluster in the new file has identical entries in both FATs.
+	for _, cluster := range chain {
+		values := make([]uint32, fs.boot.NumberOfFATs)
+
+		for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
+			offset := fs.layout.FATOffset +
+				int64(fat)*int64(fs.boot.SectorsPerFAT)*int64(fs.boot.BytesPerSector) +
+				int64(cluster)*4
+
+			var buf [4]byte
+
+			if _, err := fs.reader.ReadAt(buf[:], offset); err != nil {
+				t.Fatalf(
+					"read FAT %d entry for cluster %d: %v",
+					fat,
+					cluster,
+					err,
+				)
+			}
+
+			values[fat] = binary.LittleEndian.Uint32(buf[:]) &
+				0x0FFFFFFF
+		}
+
+		for fat := 1; fat < len(values); fat++ {
+			if values[fat] != values[0] {
+				t.Fatalf(
+					"cluster %d: FAT %d entry = %#x, FAT 0 entry = %#x",
+					cluster,
+					fat,
+					values[fat],
+					values[0],
+				)
+			}
+		}
+	}
+
+	if err := fs.Delete(path); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Verify that deleting the file clears its old clusters in every FAT.
+	for _, cluster := range chain {
+		for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
+			offset := fs.layout.FATOffset +
+				int64(fat)*int64(fs.boot.SectorsPerFAT)*int64(fs.boot.BytesPerSector) +
+				int64(cluster)*4
+
+			var buf [4]byte
+
+			if _, err := fs.reader.ReadAt(buf[:], offset); err != nil {
+				t.Fatalf(
+					"read FAT %d entry after delete for cluster %d: %v",
+					fat,
+					cluster,
+					err,
+				)
+			}
+
+			value := binary.LittleEndian.Uint32(buf[:]) &
+				0x0FFFFFFF
+
+			if value != 0 {
+				t.Fatalf(
+					"cluster %d: FAT %d entry after delete = %#x, want 0",
+					cluster,
+					fat,
+					value,
+				)
+			}
+		}
 	}
 }

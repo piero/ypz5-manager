@@ -38,6 +38,49 @@ type directoryEntrySlot struct {
 	Offset  uint32
 }
 
+func validateLFNSequence(entries []lfnEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// The first LFN entry on disk must have the last-entry flag
+	// and its sequence number must equal the number of LFN entries.
+	if !entries[0].IsLast {
+		return fmt.Errorf(
+			"LFN sequence is missing last-entry flag",
+		)
+	}
+
+	expected := uint8(len(entries))
+
+	for i, entry := range entries {
+		if entry.Sequence != expected {
+			return fmt.Errorf(
+				"invalid LFN sequence at entry %d: got %d, want %d",
+				i,
+				entry.Sequence,
+				expected,
+			)
+		}
+
+		// Only the first entry on disk may have the last-entry flag.
+		if i > 0 && entry.IsLast {
+			return fmt.Errorf(
+				"LFN sequence has unexpected last-entry flag at entry %d",
+				i,
+			)
+		}
+
+		if expected == 0 {
+			return fmt.Errorf("invalid LFN sequence number 0")
+		}
+
+		expected--
+	}
+
+	return nil
+}
+
 func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryRecord, error) {
 	clusters, err := fs.readClusterChain(startCluster)
 	if err != nil {
@@ -89,6 +132,14 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 			}
 
 			if len(lfn) > 0 {
+				if err := validateLFNSequence(lfn); err != nil {
+					return nil, fmt.Errorf(
+						"invalid LFN sequence for %q: %w",
+						dirEntry.ShortName,
+						err,
+					)
+				}
+
 				checksum := shortNameChecksum(entry)
 
 				for _, lfnEntry := range lfn {
@@ -388,6 +439,14 @@ func parseLFNEntry(data []byte) (lfnEntry, error) {
 	}
 
 	sequence := data[0x00]
+
+	// Bits 5 and 7 of the LFN sequence byte are reserved.
+	if sequence&0xA0 != 0 {
+		return result, fmt.Errorf(
+			"invalid LFN sequence byte: 0x%02x",
+			sequence,
+		)
+	}
 
 	result.Sequence = sequence & 0x1F
 	result.IsLast = sequence&0x40 != 0
