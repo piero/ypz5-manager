@@ -150,6 +150,7 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 	)
 }
 
+// Lookup resolves path to a file or directory.
 func (fs *Filesystem) Lookup(path string) (DirectoryEntry, error) {
 	return fs.findEntry(path)
 }

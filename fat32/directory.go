@@ -610,6 +610,7 @@ func (fs *Filesystem) ReadDir(path string) ([]DirectoryEntry, error) {
 	return filtered, nil
 }
 
+// Find resolves path to a directory.
 func (fs *Filesystem) Find(path string) (DirectoryEntry, error) {
 	entry, err := fs.findEntry(path)
 	if err != nil {

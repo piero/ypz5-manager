@@ -5,15 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 )
-
-type Entry struct {
-	Name    string
-	IsDir   bool
-	Size    uint32
-	ModTime time.Time
-}
 
 type Filesystem struct {
 	reader io.ReaderAt
@@ -592,9 +584,6 @@ func (fs *Filesystem) expandDirectory(
 
 	return nil
 }
-
-
-
 
 // createDirectoryRecord behaviour:
 // directory completely full
