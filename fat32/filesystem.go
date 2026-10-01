@@ -551,34 +551,35 @@ func (fs *Filesystem) expandDirectory(
 		return err
 	}
 
-	// Link the existing directory chain to the new clusters.
-	if err := fs.writeFATEntry(lastCluster, newChain[0]); err != nil {
-		if rollbackErr := fs.freeClusterChain(newChain[0]); rollbackErr != nil {
-			return errors.Join(err, rollbackErr)
+	rollback := func(original error) error {
+		var rollbackErr error
+
+		if err := fs.freeClusterChain(newChain[0]); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
 		}
 
-		return err
+		return errors.Join(original, rollbackErr)
 	}
 
-	// The clusters returned by allocateClusterChain are already
-	// linked together. Initialize every new directory cluster.
+	if err := fs.writeFATEntry(lastCluster, newChain[0]); err != nil {
+		return rollback(err)
+	}
+
 	for _, cluster := range newChain {
 		data := make([]byte, fs.layout.BytesPerCluster)
 
 		if err := fs.writeCluster(cluster, data); err != nil {
-			// Restore the old directory chain.
-			rollbackErr := fs.writeFATEntry(
-				lastCluster,
-				fat32EOF,
-			)
+			var rollbackErr error
 
-			freeErr := fs.freeClusterChain(newChain[0])
+			if err := fs.writeFATEntry(lastCluster, fat32EOF); err != nil {
+				rollbackErr = errors.Join(rollbackErr, err)
+			}
 
-			return errors.Join(
-				err,
-				rollbackErr,
-				freeErr,
-			)
+			if err := fs.freeClusterChain(newChain[0]); err != nil {
+				rollbackErr = errors.Join(rollbackErr, err)
+			}
+
+			return errors.Join(err, rollbackErr)
 		}
 	}
 
