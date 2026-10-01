@@ -94,7 +94,17 @@ func openYPZ5Image(t *testing.T) (*os.File, *Filesystem) {
 // YP_Z5_IMAGE="/Users/piero/Desktop/YP-Z5 image/yp-z5a-full.img" \
 // go test ./fat32
 // Opens a fresh writable clone of the pristine YP-Z5 image for each test.
+// Opens a fresh writable copy of the pristine YP-Z5 image for each test.
 func openYPZ5WriteImage(t *testing.T) (*os.File, *Filesystem) {
+	t.Helper()
+
+	_, file, fs := openYPZ5WriteImageWithPath(t)
+
+	return file, fs
+}
+
+// Opens a fresh writable copy and returns its path for independent validation.
+func openYPZ5WriteImageWithPath(t *testing.T) (string, *os.File, *Filesystem) {
 	t.Helper()
 
 	sourcePath := ypz5ImagePath(t)
@@ -135,12 +145,10 @@ func openYPZ5WriteImage(t *testing.T) (*os.File, *Filesystem) {
 	}
 
 	t.Cleanup(func() {
-		if err := destination.Close(); err != nil {
-			t.Errorf("close test image: %v", err)
-		}
+		_ = destination.Close()
 	})
 
-	return destination, fs
+	return testPath, destination, fs
 }
 
 // Clones the source image on macOS/APFS, falling back to a regular copy elsewhere.
@@ -807,4 +815,179 @@ func TestYPZ5DirectoryExpansionGeometry(t *testing.T) {
 	}
 
 	t.Logf("visible entries: %d", len(entries))
+}
+
+// Exercises a complete write/replace/delete/reopen lifecycle and validates the final image with mtools.
+func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
+	imagePath, file, fs := openYPZ5WriteImageWithPath(t)
+
+	const (
+		directory   = "/Music/YPZ5 End-to-End"
+		asciiFile   = directory + "/hello.txt"
+		unicodeFile = directory + "/Caffè 🚀 日本語.txt"
+	)
+
+	original := []byte("original contents")
+	replacement := []byte("replacement contents with more data")
+	unicodeContent := []byte("unicode end-to-end test")
+
+	if err := fs.Mkdir(directory); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	if err := fs.WriteFile(asciiFile, original); err != nil {
+		t.Fatalf("WriteFile(%q): %v", asciiFile, err)
+	}
+
+	if err := fs.WriteFile(unicodeFile, unicodeContent); err != nil {
+		t.Fatalf("WriteFile(%q): %v", unicodeFile, err)
+	}
+
+	if err := fs.ReplaceFile(asciiFile, replacement); err != nil {
+		t.Fatalf("ReplaceFile(%q): %v", asciiFile, err)
+	}
+
+	if err := fs.Delete(unicodeFile); err != nil {
+		t.Fatalf("Delete(%q): %v", unicodeFile, err)
+	}
+
+	got, err := fs.ReadFile(asciiFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", asciiFile, err)
+	}
+
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf(
+			"ReadFile(%q) = %q, want %q",
+			asciiFile,
+			got,
+			replacement,
+		)
+	}
+
+	if _, err := fs.Lookup(unicodeFile); err == nil {
+		t.Fatalf("Lookup(%q) succeeded after Delete", unicodeFile)
+	}
+
+	// Close and reopen the image to verify that all changes were persisted.
+	if err := file.Close(); err != nil {
+		t.Fatalf("close writable image: %v", err)
+	}
+
+	reopened, err := os.OpenFile(imagePath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("reopen test image: %v", err)
+	}
+
+	partition := io.NewSectionReader(
+		reopened,
+		ypz5PartitionOffset,
+		ypz5PartitionSize,
+	)
+
+	reopenedFS := New(partition)
+
+	if err := reopenedFS.Open(); err != nil {
+		reopened.Close()
+		t.Fatalf("reopen filesystem: %v", err)
+	}
+
+	got, err = reopenedFS.ReadFile(asciiFile)
+	if err != nil {
+		reopened.Close()
+		t.Fatalf("ReadFile after reopen: %v", err)
+	}
+
+	if !bytes.Equal(got, replacement) {
+		reopened.Close()
+		t.Fatalf(
+			"ReadFile after reopen = %q, want %q",
+			got,
+			replacement,
+		)
+	}
+
+	if _, err := reopenedFS.Lookup(unicodeFile); err == nil {
+		reopened.Close()
+		t.Fatalf("deleted Unicode file exists after reopen")
+	}
+
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened image: %v", err)
+	}
+
+	// Validate the persisted filesystem independently with mtools.
+	if _, err := exec.LookPath("mdir"); err != nil {
+		t.Skipf("mtools not installed: %v", err)
+	}
+
+	if _, err := exec.LookPath("mtype"); err != nil {
+		t.Skipf("mtools mtype not installed: %v", err)
+	}
+
+	imageSpec := imagePath + "@@" + fmt.Sprint(ypz5PartitionOffset)
+
+	cmd := exec.Command(
+		"mdir",
+		"-i",
+		imageSpec,
+		"::"+directory,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"mtools mdir failed: %v\n%s",
+			err,
+			output,
+		)
+	}
+
+	// mtools displays the generated 8.3 alias rather than the long filename.
+	if !bytes.Contains(output, []byte("HELLO    TXT")) {
+		t.Fatalf(
+			"mtools directory listing does not contain HELLO.TXT:\n%s",
+			output,
+		)
+	}
+
+	// Verify independently that the deleted Unicode file is no longer accessible.
+	cmd = exec.Command(
+		"mtype",
+		"-i",
+		imageSpec,
+		"::"+unicodeFile,
+	)
+
+	if output, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf(
+			"mtools can still read deleted Unicode file:\n%s",
+			output,
+		)
+	}
+
+	// Read the replaced file through mtools and verify its persisted contents.
+	cmd = exec.Command(
+		"mtype",
+		"-i",
+		imageSpec,
+		"::"+asciiFile,
+	)
+
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf(
+			"mtools mtype failed: %v\n%s",
+			err,
+			output,
+		)
+	}
+
+	if !bytes.Equal(output, replacement) {
+		t.Fatalf(
+			"mtools mtype = %q, want %q",
+			output,
+			replacement,
+		)
+	}
 }
