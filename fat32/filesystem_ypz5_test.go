@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -31,21 +33,34 @@ func (w *partitionWriter) WriteAt(
 	return w.file.WriteAt(p, w.offset+off)
 }
 
-// Opens the backed-up YP-Z5 FAT32 partition as a read-only filesystem.
-func openYPZ5Image(t *testing.T) *Filesystem {
+// Returns the pristine YP-Z5 image path or skips the test when unavailable.
+func ypz5ImagePath(t *testing.T) string {
 	t.Helper()
 
 	path := os.Getenv("YP_Z5_IMAGE")
+
 	if path == "" {
-		t.Skip("YP_Z5_IMAGE is not set")
+		t.Skip("YP-Z5 integration test requires YP_Z5_IMAGE")
 	}
+
+	return path
+}
+
+// Opens the backed-up YP-Z5 FAT32 partition as a read-only filesystem.
+func openYPZ5Image(t *testing.T) (*os.File, *Filesystem) {
+	t.Helper()
+
+	path := ypz5ImagePath(t)
 
 	file, err := os.Open(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open YP-Z5 image %q: %v", path, err)
 	}
+
 	t.Cleanup(func() {
-		_ = file.Close()
+		if err := file.Close(); err != nil {
+			t.Errorf("close YP-Z5 image: %v", err)
+		}
 	})
 
 	partition := io.NewSectionReader(
@@ -57,10 +72,10 @@ func openYPZ5Image(t *testing.T) *Filesystem {
 	fs := New(partition)
 
 	if err := fs.Open(); err != nil {
-		t.Fatalf("opening YP-Z5 filesystem: %v", err)
+		t.Fatalf("open filesystem: %v", err)
 	}
 
-	return fs
+	return file, fs
 }
 
 // Opens a fresh writable copy of the pristine YP-Z5 image for each test.
@@ -78,44 +93,26 @@ func openYPZ5Image(t *testing.T) *Filesystem {
 //
 // YP_Z5_IMAGE="/Users/piero/Desktop/YP-Z5 image/yp-z5a-full.img" \
 // go test ./fat32
+// Opens a fresh writable clone of the pristine YP-Z5 image for each test.
 func openYPZ5WriteImage(t *testing.T) (*os.File, *Filesystem) {
 	t.Helper()
 
-	sourcePath := os.Getenv("YP_Z5_IMAGE")
-	if sourcePath == "" {
-		t.Fatal("YP_Z5_IMAGE is not set")
-	}
-
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		t.Fatalf("open source image: %v", err)
-	}
-	defer source.Close()
+	sourcePath := ypz5ImagePath(t)
 
 	testPath := filepath.Join(
 		t.TempDir(),
 		"yp-z5-write-test.img",
 	)
 
+	cloneYPZ5Image(t, sourcePath, testPath)
+
 	destination, err := os.OpenFile(
 		testPath,
-		os.O_CREATE|os.O_EXCL|os.O_RDWR,
-		0600,
+		os.O_RDWR,
+		0,
 	)
 	if err != nil {
-		t.Fatalf("create test image: %v", err)
-	}
-
-	if _, err := io.Copy(destination, source); err != nil {
-		destination.Close()
-
-		t.Fatalf("copy source image: %v", err)
-	}
-
-	if err := destination.Sync(); err != nil {
-		destination.Close()
-
-		t.Fatalf("sync test image: %v", err)
+		t.Fatalf("open test image: %v", err)
 	}
 
 	partition := io.NewSectionReader(
@@ -134,7 +131,6 @@ func openYPZ5WriteImage(t *testing.T) (*os.File, *Filesystem) {
 
 	if err := fs.Open(); err != nil {
 		destination.Close()
-
 		t.Fatalf("open filesystem: %v", err)
 	}
 
@@ -147,9 +143,57 @@ func openYPZ5WriteImage(t *testing.T) (*os.File, *Filesystem) {
 	return destination, fs
 }
 
+// Clones the source image on macOS/APFS, falling back to a regular copy elsewhere.
+func cloneYPZ5Image(t *testing.T, sourcePath, destinationPath string) {
+	t.Helper()
+
+	if runtime.GOOS == "darwin" {
+		cmd := exec.Command(
+			"cp",
+			"-c",
+			sourcePath,
+			destinationPath,
+		)
+
+		if output, err := cmd.CombinedOutput(); err == nil {
+			return
+		} else {
+			t.Logf(
+				"APFS clone failed, falling back to regular copy: %v: %s",
+				err,
+				output,
+			)
+		}
+	}
+
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatalf("open source image: %v", err)
+	}
+	defer source.Close()
+
+	destination, err := os.OpenFile(
+		destinationPath,
+		os.O_CREATE|os.O_EXCL|os.O_RDWR,
+		0600,
+	)
+	if err != nil {
+		t.Fatalf("create test image: %v", err)
+	}
+
+	if _, err := io.Copy(destination, source); err != nil {
+		destination.Close()
+		t.Fatalf("copy source image: %v", err)
+	}
+
+	if err := destination.Close(); err != nil {
+		t.Fatalf("close copied image: %v", err)
+	}
+}
+
 // Verifies the FAT32 geometry and root directory of the YP-Z5 image.
 func TestYPZ5Filesystem(t *testing.T) {
-	fs := openYPZ5Image(t)
+	_, fs := openYPZ5Image(t)
 
 	if got := fs.BootSector().BytesPerSector; got != 512 {
 		t.Fatalf("BytesPerSector = %d, want 512", got)
@@ -183,7 +227,7 @@ func TestYPZ5Filesystem(t *testing.T) {
 
 // Verifies that the existing Music directory can be resolved and listed.
 func TestYPZ5MusicDirectory(t *testing.T) {
-	fs := openYPZ5Image(t)
+	_, fs := openYPZ5Image(t)
 
 	entries, err := fs.ReadDir("/Music")
 	if err != nil {
@@ -213,7 +257,7 @@ func TestYPZ5MusicDirectory(t *testing.T) {
 
 // Verifies that the existing long filename and its contents can be read.
 func TestYPZ5PollonFile(t *testing.T) {
-	fs := openYPZ5Image(t)
+	_, fs := openYPZ5Image(t)
 
 	const path = "/Music/Cartoni animati/Pollon.mp3"
 
@@ -262,7 +306,7 @@ func TestYPZ5PollonFile(t *testing.T) {
 
 // Verifies that the known Pollon cluster chain is read correctly.
 func TestYPZ5PollonClusterChain(t *testing.T) {
-	fs := openYPZ5Image(t)
+	_, fs := openYPZ5Image(t)
 
 	entry, err := fs.Lookup("/Music/Cartoni animati/Pollon.mp3")
 	if err != nil {
