@@ -126,6 +126,13 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 				continue
 			}
 
+			// Volume-label entries are filesystem metadata, not files
+			// or directories exposed through the directory API.
+			if entry[0x0B]&0x08 != 0 {
+				lfn = nil
+				continue
+			}
+
 			dirEntry, err := parseDirectoryEntry(entry)
 			if err != nil {
 				return nil, err

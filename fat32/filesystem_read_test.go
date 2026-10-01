@@ -3761,3 +3761,215 @@ func TestReadDirectoryRejectsLFNWithUnexpectedLastFlag(t *testing.T) {
 		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with unexpected last-entry flag")
 	}
 }
+
+// This test verifies that a directory listing exposes "." and ".." entries.
+func TestReadDirectoryIncludesDotEntries(t *testing.T) {
+	// We'll use the same minimal FAT32 layout as the other synthetic
+	// directory tests.
+	data := make([]byte, 1024+4096)
+
+	// Root directory cluster 2 terminates here.
+	binary.LittleEndian.PutUint32(
+		data[512+2*4:512+2*4+4],
+		fat32EOF,
+	)
+
+	dot, err := encodeSpecialDirectoryEntry(".", 2)
+	if err != nil {
+		t.Fatalf("encodeSpecialDirectoryEntry(.): %v", err)
+	}
+
+	dotDot, err := encodeSpecialDirectoryEntry("..", 0)
+	if err != nil {
+		t.Fatalf("encodeSpecialDirectoryEntry(..): %v", err)
+	}
+
+	copy(data[1024:1024+32], dot[:])
+	copy(data[1024+32:1024+64], dotDot[:])
+
+	reader := bytes.NewReader(data)
+	fs := New(reader)
+
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	entries, err := fs.ReadRootDirectory()
+	if err != nil {
+		t.Fatalf("ReadRootDirectory: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	if entries[0].Name != "." {
+		t.Fatalf("first entry name = %q, want %q", entries[0].Name, ".")
+	}
+
+	if !entries[0].IsDir {
+		t.Fatal("'.' entry is not marked as a directory")
+	}
+
+	if entries[0].StartCluster != 2 {
+		t.Fatalf(
+			"'.' start cluster = %d, want 2",
+			entries[0].StartCluster,
+		)
+	}
+
+	if entries[1].Name != ".." {
+		t.Fatalf("second entry name = %q, want %q", entries[1].Name, "..")
+	}
+
+	if !entries[1].IsDir {
+		t.Fatal("'..' entry is not marked as a directory")
+	}
+
+	if entries[1].StartCluster != 0 {
+		t.Fatalf(
+			"'..' start cluster = %d, want 0",
+			entries[1].StartCluster,
+		)
+	}
+}
+
+// This test verifies that ReadDir hides "." and ".." bookkeeping entries.
+func TestMkdirReadDirHidesDotEntries(t *testing.T) {
+	_, fs, _ := newAPITestFilesystem()
+
+	if err := fs.Mkdir("/TESTDIR"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	entries, err := fs.ReadDir("/TESTDIR")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf("got %d entries, want 0", len(entries))
+	}
+
+	// Read the underlying directory records to verify that "." and ".."
+	// actually exist and were only filtered by ReadDir.
+	dir, err := fs.Find("/TESTDIR")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+
+	entries, err = fs.readDirectory(dir.StartCluster)
+	if err != nil {
+		t.Fatalf("readDirectory: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("underlying directory has %d entries, want 2", len(entries))
+	}
+
+	if entries[0].Name != "." {
+		t.Fatalf(
+			"first underlying entry name = %q, want %q",
+			entries[0].Name,
+			".",
+		)
+	}
+
+	if entries[1].Name != ".." {
+		t.Fatalf(
+			"second underlying entry name = %q, want %q",
+			entries[1].Name,
+			"..",
+		)
+	}
+}
+
+// This test verifies that "." and ".." do not prevent child-file lookup.
+func TestMkdirDotEntriesDoNotInterfereWithChildFileLookup(t *testing.T) {
+	_, fs, _ := newAPITestFilesystem()
+
+	if err := fs.Mkdir("/TESTDIR"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	if err := fs.WriteFile("/TESTDIR/FILE.TXT", []byte("hello")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entry, err := fs.Lookup("/TESTDIR/FILE.TXT")
+	if err != nil {
+		t.Fatalf("Lookup child file: %v", err)
+	}
+
+	if entry.Name != "FILE.TXT" {
+		t.Fatalf("entry name = %q, want %q", entry.Name, "FILE.TXT")
+	}
+
+	if entry.IsDir {
+		t.Fatal("child file is marked as a directory")
+	}
+}
+
+// This test verifies that a volume-label entry is not exposed as a regular file.
+func TestReadDirectoryIgnoresVolumeLabel(t *testing.T) {
+	var volumeLabel [11]byte
+	copy(volumeLabel[:], []byte("YP-Z5      "))
+
+	entry := encodeDirectoryEntry(
+		volumeLabel,
+		0x08,
+		0,
+		0,
+	)
+
+	data := make([]byte, 1024+4096)
+
+	binary.LittleEndian.PutUint32(
+		data[512+2*4:512+2*4+4],
+		fat32EOF,
+	)
+
+	copy(data[1024:1024+32], entry[:])
+
+	reader := bytes.NewReader(data)
+	fs := New(reader)
+
+	fs.boot = BootSector{
+		BytesPerSector:    512,
+		SectorsPerCluster: 8,
+		ReservedSectors:   1,
+		NumberOfFATs:      1,
+		SectorsPerFAT:     1,
+		TotalSectors:      9,
+		RootCluster:       2,
+	}
+
+	fs.layout = Layout{
+		FATOffset:       512,
+		DataOffset:      1024,
+		BytesPerCluster: 4096,
+	}
+
+	entries, err := fs.ReadRootDirectory()
+	if err != nil {
+		t.Fatalf("ReadRootDirectory: %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf(
+			"ReadRootDirectory returned %d entries, want 0",
+			len(entries),
+		)
+	}
+}
