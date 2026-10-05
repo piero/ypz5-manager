@@ -201,12 +201,6 @@ func main() {
 		"path to a FAT32 device or partition",
 	)
 
-	offset := flag.Int64(
-		"offset",
-		0,
-		"byte offset of the FAT32 filesystem within the storage",
-	)
-
 	write := flag.Bool(
 		"write",
 		false,
@@ -237,7 +231,7 @@ func main() {
 		path = *devicePath
 	}
 
-	storage, err := openStorage(path, *offset, *write)
+	storage, err := openStorage(path, *write)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open:", err)
 		os.Exit(1)

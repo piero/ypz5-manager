@@ -1,28 +1,45 @@
 package main
 
 import (
+	"encoding/binary"
 	"os"
 	"testing"
 )
 
-// TestOpenStorageReadsAndWritesAtTheRequestedOffset verifies that the storage offset is transparent to callers.
-func TestOpenStorageReadsAndWritesAtTheRequestedOffset(t *testing.T) {
+// TestOpenStorageReadsAndWritesAtTheDetectedPartitionOffset verifies automatic MBR partition detection.
+func TestOpenStorageReadsAndWritesAtTheDetectedPartitionOffset(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "storage-*.img")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
 
-	initial := make([]byte, 32)
-	if _, err := file.Write(initial); err != nil {
+	partitionOffset := int64(16384)
+
+	mbr := make([]byte, 512)
+	mbr[0x1FE] = 0x55
+	mbr[0x1FF] = 0xAA
+
+	entryOffset := 0x1BE
+	mbr[entryOffset+4] = fat32PartitionTypeLBA
+	binary.LittleEndian.PutUint32(
+		mbr[entryOffset+8:entryOffset+12],
+		uint32(partitionOffset/sectorSize),
+	)
+
+	if _, err := file.Write(mbr); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := file.WriteAt([]byte("original"), 16); err != nil {
+	if err := file.Truncate(partitionOffset + 4096); err != nil {
 		t.Fatal(err)
 	}
 
-	storage, err := openStorage(file.Name(), 16, true)
+	if _, err := file.WriteAt([]byte("original"), partitionOffset); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := openStorage(file.Name(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +59,7 @@ func TestOpenStorageReadsAndWritesAtTheRequestedOffset(t *testing.T) {
 	}
 
 	raw := make([]byte, 7)
-	if _, err := file.ReadAt(raw, 16); err != nil {
+	if _, err := file.ReadAt(raw, partitionOffset); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,10 +68,33 @@ func TestOpenStorageReadsAndWritesAtTheRequestedOffset(t *testing.T) {
 	}
 }
 
-// TestOpenStorageRejectsNegativeOffset verifies that invalid offsets are rejected before opening the file.
-func TestOpenStorageRejectsNegativeOffset(t *testing.T) {
-	_, err := openStorage("does-not-matter", -1, false)
-	if err == nil {
-		t.Fatal("expected error")
+// TestOpenStorageUsesZeroOffsetForFAT32PartitionImages verifies partition images need no partition table.
+func TestOpenStorageUsesZeroOffsetForFAT32PartitionImages(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "storage-*.img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	bootSector := make([]byte, 512)
+	copy(bootSector[0x52:0x5A], "FAT32   ")
+
+	if _, err := file.Write(bootSector); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := openStorage(file.Name(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	buf := make([]byte, 8)
+	if _, err := storage.ReadAt(buf, 0x52); err != nil {
+		t.Fatal(err)
+	}
+
+	if string(buf) != "FAT32   " {
+		t.Fatalf("got %q, want %q", string(buf), "FAT32   ")
 	}
 }
