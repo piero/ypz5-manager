@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+	"unicode/utf16"
 )
 
 // Case-insensitive lookup
@@ -3971,5 +3972,829 @@ func TestReadDirectoryIgnoresVolumeLabel(t *testing.T) {
 			"ReadRootDirectory returned %d entries, want 0",
 			len(entries),
 		)
+	}
+}
+
+// An LFN immediately followed by end-of-directory is ignored.
+func TestReadDirectoryIgnoresOrphanedLFNAtEndOfDirectory(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	lfn, err := encodeLFNEntryUnits(
+		0x41,
+		utf16.Encode([]rune("orphan.txt")),
+		0,
+	)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	// Mark the next directory entry as end-of-directory.
+	root[32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf("readDirectory returned %d entries, want 0", len(entries))
+	}
+}
+
+// An LFN followed by a deleted entry is discarded before the next valid entry.
+func TestReadDirectoryIgnoresOrphanedLFNBeforeDeletedEntry(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	lfn, err := encodeLFNEntryUnits(
+		0x41,
+		utf16.Encode([]rune("orphan.txt")),
+		0,
+	)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	// A deleted entry must discard the pending LFN.
+	root[32] = 0xE5
+
+	shortName, err := encodeShortName("VALID.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	copy(root[64:96], short[:])
+
+	// Mark the next entry as end-of-directory.
+	root[96] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != "VALID.TXT" {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			"VALID.TXT",
+		)
+	}
+}
+
+// A valid UTF-16 surrogate pair is decoded into the corresponding Unicode character.
+func TestReadDirectoryDecodesLFNSurrogatePair(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("EMOJI.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	name := "emoji 😀.txt"
+	units := utf16.Encode([]rune(name))
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, units, checksum)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	copy(root[32:64], short[:])
+
+	// Mark the next directory entry as end-of-directory.
+	root[64] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != name {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			name,
+		)
+	}
+}
+
+// An unpaired UTF-16 surrogate is replaced with U+FFFD when decoding an LFN.
+func TestReadDirectoryHandlesUnpairedLFNSurrogate(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("BAD.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	// Deliberately construct an invalid UTF-16 sequence containing
+	// a lone high surrogate.
+	units := []uint16{
+		'H',
+		0xD83D,
+		'e',
+		'l',
+		'l',
+		'o',
+	}
+
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, units, checksum)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	copy(root[32:64], short[:])
+
+	// Mark the next directory entry as end-of-directory.
+	root[64] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	want := "H\uFFFDello"
+
+	if entries[0].Name != want {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			want,
+		)
+	}
+}
+
+// An LFN terminator followed by 0xFFFF padding is decoded without the padding.
+func TestReadDirectoryLFNTerminatorAndPadding(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("PAD.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	name := "Padding.txt"
+	units := utf16.Encode([]rune(name))
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, units, checksum)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	copy(root[32:64], short[:])
+	root[64] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != name {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			name,
+		)
+	}
+}
+
+// An LFN using all 13 UTF-16 units without a terminator is decoded correctly.
+func TestReadDirectoryLFNExactlyFillsEntry(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("THIRTEEN.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	name := "1234567890123"
+	units := utf16.Encode([]rune(name))
+
+	if len(units) != 13 {
+		t.Fatalf(
+			"test name has %d UTF-16 units, want 13",
+			len(units),
+		)
+	}
+
+	checksum := shortNameChecksum(shortName[:])
+
+	lfn, err := encodeLFNEntryUnits(0x41, units, checksum)
+	if err != nil {
+		t.Fatalf("encode LFN entry: %v", err)
+	}
+
+	copy(root[0:32], lfn[:])
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		0,
+	)
+
+	copy(root[32:64], short[:])
+	root[64] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != name {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			name,
+		)
+	}
+}
+
+// Read-only and hidden attributes do not prevent a file from being listed.
+func TestReadDirectoryIncludesReadOnlyHiddenFile(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("SECRET.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	// Read-only + hidden + archive.
+	short := encodeDirectoryEntry(
+		shortName,
+		0x01|0x02|0x20,
+		0,
+		123,
+	)
+
+	copy(root[0:32], short[:])
+	root[32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != "SECRET.TXT" {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			"SECRET.TXT",
+		)
+	}
+
+	if entries[0].Size != 123 {
+		t.Fatalf(
+			"entry size = %d, want 123",
+			entries[0].Size,
+		)
+	}
+
+	if entries[0].IsDir {
+		t.Fatal("read-only hidden file reported as directory")
+	}
+}
+
+// The system attribute does not prevent a file from being listed.
+func TestReadDirectoryIncludesSystemFile(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("SYSTEM.BIN")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x04,
+		0,
+		456,
+	)
+
+	copy(root[0:32], short[:])
+	root[32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	entries, err := fs.readDirectory(2)
+	if err != nil {
+		t.Fatalf("readDirectory returned error: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("readDirectory returned %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != "SYSTEM.BIN" {
+		t.Fatalf(
+			"entry name = %q, want %q",
+			entries[0].Name,
+			"SYSTEM.BIN",
+		)
+	}
+
+	if entries[0].Size != 456 {
+		t.Fatalf(
+			"entry size = %d, want 456",
+			entries[0].Size,
+		)
+	}
+
+	if entries[0].IsDir {
+		t.Fatal("system file reported as directory")
+	}
+}
+
+// A non-empty file with no start cluster is rejected when its contents are read.
+func TestReadFileRejectsNonEmptyFileWithZeroStartCluster(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("BROKEN.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		0,
+		1,
+	)
+
+	copy(root[0:32], short[:])
+	root[32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	_, err = fs.ReadFile("BROKEN.TXT")
+	if err == nil {
+		t.Fatal("ReadFile returned nil error for non-empty file with zero start cluster")
+	}
+}
+
+// A file whose start cluster exceeds the filesystem range is rejected.
+func TestReadFileRejectsStartClusterAboveMaxCluster(t *testing.T) {
+	data := make([]byte, 2048)
+
+	// FAT: cluster 2 -> EOF.
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("BROKEN.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	// This minimal filesystem has MaxCluster == 3.
+	invalidCluster := uint32(4)
+
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		invalidCluster,
+		1,
+	)
+
+	copy(root[0:32], short[:])
+	root[32] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      4,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	_, err = fs.ReadFile("BROKEN.TXT")
+	if err == nil {
+		t.Fatal("ReadFile returned nil error for start cluster above MaxCluster")
+	}
+}
+
+// A file whose size requires more clusters than its FAT chain provides is rejected.
+func TestReadFileRejectsShortClusterChainForFileSize(t *testing.T) {
+	data := make([]byte, 3072)
+
+	// FAT:
+	// cluster 2 -> EOF (root directory)
+	// cluster 3 -> EOF (file has only one data cluster)
+	binary.LittleEndian.PutUint32(data[512+2*4:], fat32EOF)
+	binary.LittleEndian.PutUint32(data[512+3*4:], fat32EOF)
+
+	root := data[1024:]
+
+	shortName, err := encodeShortName("SHORT.TXT")
+	if err != nil {
+		t.Fatalf("encode short name: %v", err)
+	}
+
+	// Cluster size is 1024 bytes, but the file claims 1025 bytes.
+	short := encodeDirectoryEntry(
+		shortName,
+		0x20,
+		3,
+		1025,
+	)
+
+	copy(root[0:32], short[:])
+	root[32] = 0x00
+
+	// Put one valid byte pattern into the only file cluster.
+	fileCluster := data[2048:]
+	for i := range fileCluster {
+		fileCluster[i] = 0xAA
+	}
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      6,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	_, err = fs.ReadFile("SHORT.TXT")
+	if err == nil {
+		t.Fatal(
+			"ReadFile returned nil error for file size larger than cluster chain",
+		)
+	}
+}
+
+// A zero-length file requires no data clusters.
+func TestClustersForSizeZero(t *testing.T) {
+	fs := &Filesystem{
+		layout: Layout{
+			BytesPerCluster: 4096,
+		},
+	}
+
+	if got := fs.clustersForSize(0); got != 0 {
+		t.Fatalf("clustersForSize(0) = %d, want 0", got)
+	}
+}
+
+// A size exactly divisible by the cluster size requires no extra cluster.
+func TestClustersForSizeExactClusterBoundary(t *testing.T) {
+	fs := &Filesystem{
+		layout: Layout{
+			BytesPerCluster: 4096,
+		},
+	}
+
+	if got := fs.clustersForSize(8192); got != 2 {
+		t.Fatalf("clustersForSize(8192) = %d, want 2", got)
+	}
+}
+
+// The maximum uint32 file size rounds up without overflowing.
+func TestClustersForSizeMaximumUint32(t *testing.T) {
+	fs := &Filesystem{
+		layout: Layout{
+			BytesPerCluster: 4096,
+		},
+	}
+
+	const maxUint32 = uint32(^uint32(0))
+
+	got := fs.clustersForSize(int(maxUint32))
+
+	want := 1048576
+
+	if got != want {
+		t.Fatalf(
+			"clustersForSize(max uint32) = %d, want %d",
+			got,
+			want,
+		)
+	}
+}
+
+// A FAT32 reserved cluster value is rejected rather than followed as a cluster.
+func TestClusterChainRejectsReservedFATValue(t *testing.T) {
+	data := make([]byte, 3072)
+
+	// FAT:
+	// cluster 2 -> reserved value 0x0FFFFFF0
+	binary.LittleEndian.PutUint32(
+		data[512+2*4:],
+		0x0FFFFFF0,
+	)
+
+	// Root directory cluster 2.
+	root := data[1024:]
+	root[0] = 0x00
+
+	fs := &Filesystem{
+		reader: bytes.NewReader(data),
+		boot: BootSector{
+			BytesPerSector:    512,
+			SectorsPerCluster: 2,
+			ReservedSectors:   1,
+			NumberOfFATs:      1,
+			SectorsPerFAT:     1,
+			TotalSectors:      6,
+			RootCluster:       2,
+		},
+		layout: Layout{
+			FATOffset:       512,
+			DataOffset:      1024,
+			BytesPerCluster: 1024,
+		},
+	}
+
+	_, err := fs.ClusterChain(2)
+	if err == nil {
+		t.Fatal("ClusterChain returned nil error for reserved FAT value")
 	}
 }
