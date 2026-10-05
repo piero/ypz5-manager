@@ -12,13 +12,16 @@ import (
 )
 
 type model struct {
-	fs      *fat32.Filesystem
-	source  string
-	path    string
-	entries []fat32.DirectoryEntry
-	cursor  int
-	err     error
-	file    *fat32.DirectoryEntry
+	fs            *fat32.Filesystem
+	source        string
+	isDevice      bool
+	writeEnabled  bool
+	confirmDevice bool
+	path          string
+	entries       []fat32.DirectoryEntry
+	cursor        int
+	err           error
+	file          *fat32.DirectoryEntry
 }
 
 func (m model) Init() tea.Cmd {
@@ -43,6 +46,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	                               Directory
 	                               m.file = nil
 	*/
+
+	if m.confirmDevice {
+		if key, ok := msg.(tea.KeyPressMsg); ok {
+			switch key.String() {
+			case "y":
+				m.writeEnabled = true
+				m.confirmDevice = false
+
+			case "n", "q", "esc":
+				return m, tea.Quit
+			}
+		}
+
+		return m, nil
+	}
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
@@ -117,6 +135,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
+	if m.confirmDevice {
+		return tea.NewView(
+			fmt.Sprintf(
+				"YPZ5 Manager\n\n"+
+					"WARNING: this is a real device.\n\n"+
+					"Storage: %s\n\n"+
+					"Write access has been requested.\n"+
+					"Any filesystem changes will modify the device directly.\n\n"+
+					"Continue with write access? [y/N]\n",
+				m.source,
+			),
+		)
+	}
+
 	if m.err != nil {
 		return tea.NewView(fmt.Sprintf("Error: %v\n", m.err))
 	}
@@ -129,6 +161,13 @@ func (m model) View() tea.View {
 
 	s += "YPZ5 Manager\n\n"
 	s += fmt.Sprintf("Storage: %s\n", m.source)
+
+	mode := "read-only"
+	if m.writeEnabled {
+		mode = "READ/WRITE"
+	}
+
+	s += fmt.Sprintf("Mode:    %s\n", mode)
 	s += fmt.Sprintf("Path:    %s\n\n", m.path)
 
 	for i, entry := range m.entries {
@@ -181,6 +220,11 @@ func (m model) fileView() tea.View {
 
 	s += "YPZ5 Manager\n\n"
 	s += fmt.Sprintf("Storage: %s\n", m.source)
+	mode := "read-only"
+	if m.writeEnabled {
+		mode = "READ/WRITE"
+	}
+	s += fmt.Sprintf("Mode:    %s\n", mode)
 	s += fmt.Sprintf("Path: %s\n\n", m.path)
 	s += fmt.Sprintf("Name:          %s\n", entry.Name)
 	s += "Type:          File\n"
@@ -234,7 +278,7 @@ func main() {
 		path = *devicePath
 	}
 
-	storage, err := openStorage(path, *write)
+	storage, err := openStorage(path, *write, *devicePath != "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open:", err)
 		os.Exit(1)
@@ -261,10 +305,13 @@ func main() {
 	}
 
 	m := model{
-		fs:      fs,
-		source:  storage.Source(),
-		path:    "/",
-		entries: entries,
+		fs:            fs,
+		source:        storage.Source(),
+		isDevice:      storage.IsDevice(),
+		writeEnabled:  !storage.IsDevice() && *write,
+		confirmDevice: storage.IsDevice() && *write,
+		path:          "/",
+		entries:       entries,
 	}
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {

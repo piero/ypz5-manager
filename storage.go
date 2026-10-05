@@ -21,12 +21,13 @@ const (
 )
 
 type storage struct {
-	file   *os.File
-	offset int64
-	source string
+	file     *os.File
+	offset   int64
+	source   string
+	isDevice bool
 }
 
-func openStorage(path string, writable bool) (*storage, error) {
+func openStorage(path string, writable bool, isDevice bool) (*storage, error) {
 	flags := os.O_RDONLY
 	if writable {
 		flags = os.O_RDWR
@@ -44,14 +45,19 @@ func openStorage(path string, writable bool) (*storage, error) {
 	}
 
 	return &storage{
-		file:   f,
-		offset: offset,
-		source: path,
+		file:     f,
+		offset:   offset,
+		source:   path,
+		isDevice: isDevice,
 	}, nil
 }
 
 func (s *storage) Source() string {
 	return s.source
+}
+
+func (s *storage) IsDevice() bool {
+	return s.isDevice
 }
 
 func (s *storage) Close() error {
