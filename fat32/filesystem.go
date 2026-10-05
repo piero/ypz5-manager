@@ -732,3 +732,70 @@ func (fs *Filesystem) createDirectoryRecord(
 
 	return nil
 }
+
+func (fs *Filesystem) RemoveAll(path string) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	record, err := fs.findDirectoryRecord(path)
+	if err != nil {
+		return err
+	}
+
+	if !record.Entry.IsDir {
+		return fs.Delete(path)
+	}
+
+	// Never allow the filesystem root to be removed.
+	if path == "/" {
+		return fmt.Errorf("cannot remove root directory")
+	}
+
+	entries, err := fs.readDirectoryRecords(record.Entry.StartCluster)
+	if err != nil {
+		return err
+	}
+
+	for _, child := range entries {
+		switch child.Entry.Name {
+		case ".", "..":
+			continue
+		}
+
+		childPath := path
+		if childPath != "/" {
+			childPath += "/"
+		}
+		childPath += child.Entry.Name
+
+		if err := fs.RemoveAll(childPath); err != nil {
+			return err
+		}
+	}
+
+	// The directory is now empty, so remove its directory record.
+	if err := fs.deleteDirectoryRecord(record); err != nil {
+		return err
+	}
+
+	// Finally release the directory's own cluster chain.
+	if record.Entry.StartCluster != 0 {
+		chain, err := fs.readClusterChain(record.Entry.StartCluster)
+		if err != nil {
+			return err
+		}
+
+		for _, cluster := range chain {
+			if err := fs.writeFATEntry(cluster, 0); err != nil {
+				return fmt.Errorf(
+					"free directory cluster %d: %w",
+					cluster,
+					err,
+				)
+			}
+		}
+	}
+
+	return nil
+}

@@ -22,6 +22,10 @@ type model struct {
 	cursor        int
 	err           error
 	file          *fat32.DirectoryEntry
+
+	deletePath    string
+	deleteIsDir   bool
+	confirmDelete bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -47,15 +51,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	                               m.file = nil
 	*/
 
-	if m.confirmDevice {
+	if m.confirmDelete {
 		if key, ok := msg.(tea.KeyPressMsg); ok {
 			switch key.String() {
 			case "y":
-				m.writeEnabled = true
-				m.confirmDevice = false
+				if err := fsDelete(&m, m.deletePath); err != nil {
+					m.err = err
+				}
 
-			case "n", "q", "esc":
-				return m, tea.Quit
+				m.confirmDelete = false
+				m.deletePath = ""
+				m.deleteIsDir = false
+
+			case "n", "esc":
+				m.confirmDelete = false
+				m.deletePath = ""
+				m.deleteIsDir = false
 			}
 		}
 
@@ -78,6 +89,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
+		// View directory or file
 		case "enter":
 			if len(m.entries) == 0 {
 				return m, nil
@@ -107,6 +119,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.file = nil
 
+		// Navigate back
 		case "backspace", "h":
 			if m.file != nil {
 				m.file = nil
@@ -128,6 +141,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.path = path
 			m.entries = entries
 			m.cursor = 0
+
+		// Delete file (not directory)
+		case "d":
+			if !m.writeEnabled {
+				return m, nil
+			}
+
+			if len(m.entries) == 0 {
+				return m, nil
+			}
+
+			entry := m.entries[m.cursor]
+
+			deletePath := m.path
+			if deletePath != "/" {
+				deletePath += "/"
+			}
+			deletePath += entry.Name
+
+			m.deletePath = deletePath
+			m.deleteIsDir = entry.IsDir
+			m.confirmDelete = true
+
+			return m, nil
 		}
 	}
 
@@ -145,6 +182,34 @@ func (m model) View() tea.View {
 					"Any filesystem changes will modify the device directly.\n\n"+
 					"Continue with write access? [y/N]\n",
 				m.source,
+			),
+		)
+	}
+
+	if m.confirmDelete {
+		if m.deleteIsDir {
+			return tea.NewView(
+				fmt.Sprintf(
+					"YPZ5 Manager\n\n"+
+						"Delete directory?\n\n"+
+						"  %s\n\n"+
+						"WARNING: this will recursively delete\n"+
+						"the directory and all of its contents.\n\n"+
+						"This operation cannot be undone.\n\n"+
+						"Delete recursively? [y/N]\n",
+					m.deletePath,
+				),
+			)
+		}
+
+		return tea.NewView(
+			fmt.Sprintf(
+				"YPZ5 Manager\n\n"+
+					"Delete file?\n\n"+
+					"  %s\n\n"+
+					"This operation cannot be undone.\n\n"+
+					"Delete? [y/N]\n",
+				m.deletePath,
 			),
 		)
 	}
@@ -190,7 +255,7 @@ func (m model) View() tea.View {
 		)
 	}
 
-	s += "\n↑/↓: navigate   Enter: open   Backspace/h: parent   q: quit\n"
+	s += "\n↑/↓: navigate   Enter: open   Backspace/h: parent   d: delete   q: quit\n"
 
 	return tea.NewView(s)
 }
@@ -233,6 +298,33 @@ func (m model) fileView() tea.View {
 	s += "\nBackspace/h: back   q: quit\n"
 
 	return tea.NewView(s)
+}
+
+func fsDelete(m *model, path string) error {
+	if !m.writeEnabled {
+		return fmt.Errorf("filesystem is read-only")
+	}
+
+	if err := m.fs.RemoveAll(path); err != nil {
+		return err
+	}
+
+	entries, err := loadDirectory(m.fs, m.path)
+	if err != nil {
+		return err
+	}
+
+	m.entries = entries
+
+	if m.cursor >= len(m.entries) {
+		m.cursor = len(m.entries) - 1
+	}
+
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+
+	return nil
 }
 
 func main() {
