@@ -13,6 +13,7 @@ import (
 
 type model struct {
 	fs      *fat32.Filesystem
+	source  string
 	path    string
 	entries []fat32.DirectoryEntry
 	cursor  int
@@ -126,8 +127,9 @@ func (m model) View() tea.View {
 
 	var s string
 
-	s += fmt.Sprintf("YPZ5 Manager\n\n")
-	s += fmt.Sprintf("Path: %s\n\n", m.path)
+	s += "YPZ5 Manager\n\n"
+	s += fmt.Sprintf("Storage: %s\n", m.source)
+	s += fmt.Sprintf("Path:    %s\n\n", m.path)
 
 	for i, entry := range m.entries {
 		cursor := "  "
@@ -178,9 +180,10 @@ func (m model) fileView() tea.View {
 	var s string
 
 	s += "YPZ5 Manager\n\n"
+	s += fmt.Sprintf("Storage: %s\n", m.source)
 	s += fmt.Sprintf("Path: %s\n\n", m.path)
 	s += fmt.Sprintf("Name:          %s\n", entry.Name)
-	s += fmt.Sprint("Type:          File\n")
+	s += "Type:          File\n"
 	s += fmt.Sprintf("Size:          %d bytes\n", entry.Size)
 	s += fmt.Sprintf("Start cluster: %d\n", entry.StartCluster)
 	s += "\nBackspace/h: back   q: quit\n"
@@ -259,6 +262,7 @@ func main() {
 
 	m := model{
 		fs:      fs,
+		source:  storage.Source(),
 		path:    "/",
 		entries: entries,
 	}

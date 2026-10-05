@@ -23,6 +23,7 @@ const (
 type storage struct {
 	file   *os.File
 	offset int64
+	source string
 }
 
 func openStorage(path string, writable bool) (*storage, error) {
@@ -45,7 +46,12 @@ func openStorage(path string, writable bool) (*storage, error) {
 	return &storage{
 		file:   f,
 		offset: offset,
+		source: path,
 	}, nil
+}
+
+func (s *storage) Source() string {
+	return s.source
 }
 
 func (s *storage) Close() error {
