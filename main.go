@@ -17,60 +17,59 @@ type model struct {
 	isDevice      bool
 	writeEnabled  bool
 	confirmDevice bool
-	path          string
-	entries       []fat32.DirectoryEntry
-	cursor        int
-	err           error
-	file          *fat32.DirectoryEntry
 
 	deletePath    string
 	deleteIsDir   bool
 	confirmDelete bool
+
+	local        *localBrowser
+	localError   error
+	localConfirm bool
+
+	path    string
+	entries []fat32.DirectoryEntry
+	cursor  int
+	err     error
+	file    *fat32.DirectoryEntry
 }
 
 func (m model) Init() tea.Cmd {
 	return nil
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	/*
-	 NAVIGATION:
+/*
+NAVIGATION:
 
-	 Directory
-	   │
-	   ├── Enter on directory ──> Directory
-	   │                           m.file = nil
-	   │
-	   └── Enter on file ────────> File view
-	                               m.file != nil
-	                                   │
-	                              Backspace/h
-	                                   │
-	                                   ▼
-	                               Directory
-	                               m.file = nil
-	*/
+Directory
+
+	│
+	├── Enter on directory ──> Directory
+	│                           m.file = nil
+	│
+	└── Enter on file ────────> File view
+	                            m.file != nil
+	                                │
+	                           Backspace/h
+	                                │
+	                                ▼
+	                            Directory
+	                            m.file = nil
+*/
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.confirmDevice {
+		return m.updateDeviceConfirmation(msg)
+	}
 
 	if m.confirmDelete {
-		if key, ok := msg.(tea.KeyPressMsg); ok {
-			switch key.String() {
-			case "y":
-				if err := fsDelete(&m, m.deletePath); err != nil {
-					m.err = err
-				}
+		return m.updateDeleteConfirmation(msg)
+	}
 
-				m.confirmDelete = false
-				m.deletePath = ""
-				m.deleteIsDir = false
+	if m.localConfirm {
+		return m.updateLocalConfirmation(msg)
+	}
 
-			case "n", "esc":
-				m.confirmDelete = false
-				m.deletePath = ""
-				m.deleteIsDir = false
-			}
-		}
-
-		return m, nil
+	if m.local != nil {
+		return m.updateLocalBrowser(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -78,6 +77,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
+		case "n":
+			if !m.writeEnabled {
+				return m, nil
+			}
+
+			browser, err := newLocalBrowser()
+			if err != nil {
+				m.err = err
+				return m, nil
+			}
+
+			m.local = browser
+			m.localError = nil
+			m.file = nil
+
+		case "d":
+			if !m.writeEnabled || len(m.entries) == 0 {
+				return m, nil
+			}
+
+			entry := m.entries[m.cursor]
+
+			m.deletePath = joinPath(m.path, entry.Name)
+			m.deleteIsDir = entry.IsDir
+			m.confirmDelete = true
 
 		case "up", "k":
 			if m.cursor > 0 {
@@ -89,7 +114,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
-		// View directory or file
 		case "enter":
 			if len(m.entries) == 0 {
 				return m, nil
@@ -102,11 +126,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			path := m.path
-			if path != "/" {
-				path += "/"
-			}
-			path += entry.Name
+			path := joinPath(m.path, entry.Name)
 
 			entries, err := loadDirectory(m.fs, path)
 			if err != nil {
@@ -119,7 +139,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.file = nil
 
-		// Navigate back
 		case "backspace", "h":
 			if m.file != nil {
 				m.file = nil
@@ -141,30 +160,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.path = path
 			m.entries = entries
 			m.cursor = 0
-
-		// Delete file (not directory)
-		case "d":
-			if !m.writeEnabled {
-				return m, nil
-			}
-
-			if len(m.entries) == 0 {
-				return m, nil
-			}
-
-			entry := m.entries[m.cursor]
-
-			deletePath := m.path
-			if deletePath != "/" {
-				deletePath += "/"
-			}
-			deletePath += entry.Name
-
-			m.deletePath = deletePath
-			m.deleteIsDir = entry.IsDir
-			m.confirmDelete = true
-
-			return m, nil
 		}
 	}
 
@@ -173,45 +168,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 	if m.confirmDevice {
-		return tea.NewView(
-			fmt.Sprintf(
-				"YPZ5 Manager\n\n"+
-					"WARNING: this is a real device.\n\n"+
-					"Storage: %s\n\n"+
-					"Write access has been requested.\n"+
-					"Any filesystem changes will modify the device directly.\n\n"+
-					"Continue with write access? [y/N]\n",
-				m.source,
-			),
-		)
+		return tea.NewView(m.deviceConfirmationView())
 	}
 
 	if m.confirmDelete {
-		if m.deleteIsDir {
-			return tea.NewView(
-				fmt.Sprintf(
-					"YPZ5 Manager\n\n"+
-						"Delete directory?\n\n"+
-						"  %s\n\n"+
-						"WARNING: this will recursively delete\n"+
-						"the directory and all of its contents.\n\n"+
-						"This operation cannot be undone.\n\n"+
-						"Delete recursively? [y/N]\n",
-					m.deletePath,
-				),
-			)
-		}
+		return tea.NewView(m.deleteConfirmationView())
+	}
 
-		return tea.NewView(
-			fmt.Sprintf(
-				"YPZ5 Manager\n\n"+
-					"Delete file?\n\n"+
-					"  %s\n\n"+
-					"This operation cannot be undone.\n\n"+
-					"Delete? [y/N]\n",
-				m.deletePath,
-			),
-		)
+	if m.local != nil {
+		return tea.NewView(m.localView())
 	}
 
 	if m.err != nil {
@@ -225,23 +190,25 @@ func (m model) View() tea.View {
 	var s string
 
 	s += "YPZ5 Manager\n\n"
-	s += fmt.Sprintf("Storage: %s\n", m.source)
+	s += fmt.Sprintf("Source: %s\n", m.source)
 
-	mode := "read-only"
 	if m.writeEnabled {
-		mode = "READ/WRITE"
+		s += "Mode:   READ/WRITE\n"
+	} else {
+		s += "Mode:   READ-ONLY\n"
 	}
 
-	s += fmt.Sprintf("Mode:    %s\n", mode)
-	s += fmt.Sprintf("Path:    %s\n\n", m.path)
+	s += fmt.Sprintf("\nPath: %s\n\n", m.path)
 
 	for i, entry := range m.entries {
 		cursor := "  "
+
 		if i == m.cursor {
 			cursor = "> "
 		}
 
 		kind := "FILE"
+
 		if entry.IsDir {
 			kind = "DIR "
 		}
@@ -255,7 +222,13 @@ func (m model) View() tea.View {
 		)
 	}
 
-	s += "\n↑/↓: navigate   Enter: open   Backspace/h: parent   d: delete   q: quit\n"
+	s += "\n↑/↓: navigate   Enter: open"
+
+	if m.writeEnabled {
+		s += "   n: add   d: delete"
+	}
+
+	s += "   q: quit\n"
 
 	return tea.NewView(s)
 }
@@ -325,6 +298,242 @@ func fsDelete(m *model, path string) error {
 	}
 
 	return nil
+}
+
+// updateDeviceConfirmation handles the confirmation required before writing to a device.
+func (m model) updateDeviceConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "y", "enter":
+			m.confirmDevice = false
+			m.writeEnabled = true
+			return m, nil
+
+		case "n", "esc", "q", "ctrl+c":
+			return m, tea.Quit
+		}
+	}
+
+	return m, nil
+}
+
+// updateDeleteConfirmation handles confirmation before deleting a file or directory.
+func (m model) updateDeleteConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "y", "enter":
+			m.confirmDelete = false
+
+			if err := fsDelete(&m, m.deletePath); err != nil {
+				m.err = err
+			}
+
+			m.deletePath = ""
+			m.deleteIsDir = false
+
+			return m, nil
+
+		case "n", "esc":
+			m.confirmDelete = false
+			m.deletePath = ""
+			m.deleteIsDir = false
+		}
+	}
+
+	return m, nil
+}
+
+// deviceConfirmationView displays the safety warning shown before enabling device writes.
+func (m model) deviceConfirmationView() string {
+	var s string
+
+	s += "YPZ5 Manager\n\n"
+	s += "WARNING\n\n"
+	s += "You are about to open a physical device for writing.\n\n"
+	s += fmt.Sprintf("Device: %s\n\n", m.source)
+	s += "Writing to the device can corrupt its filesystem or\n"
+	s += "destroy data if the device is disconnected during a write.\n\n"
+	s += "Continue and enable READ/WRITE mode?\n\n"
+	s += "y/Enter: continue   n/Esc/q: quit\n"
+
+	return s
+}
+
+// deleteConfirmationView displays the appropriate deletion warning.
+func (m model) deleteConfirmationView() string {
+	var s string
+
+	s += "YPZ5 Manager\n\n"
+	s += "WARNING\n\n"
+	s += fmt.Sprintf("Delete: %s\n\n", m.deletePath)
+
+	if m.deleteIsDir {
+		s += "This will recursively delete the directory and\n"
+		s += "ALL of its contents.\n\n"
+	} else {
+		s += "This will permanently delete the file.\n\n"
+	}
+
+	s += "This operation cannot be undone.\n\n"
+	s += "y/Enter: delete   n/Esc: cancel\n"
+
+	return s
+}
+
+// updateLocalBrowser handles navigation and selection in the local filesystem browser.
+func (m model) updateLocalBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc":
+			m.local = nil
+			m.localError = nil
+
+		case "q", "ctrl+c":
+			return m, tea.Quit
+
+		case "up", "k":
+			m.local.moveUp()
+			m.localError = nil
+
+		case "down", "j":
+			m.local.moveDown()
+			m.localError = nil
+
+		case "space":
+			m.local.toggleSelection()
+			m.localError = nil
+
+		case "enter":
+			if err := m.local.enter(); err != nil {
+				m.localError = err
+			} else {
+				m.localError = nil
+			}
+
+		case "backspace", "h":
+			if err := m.local.parent(); err != nil {
+				m.localError = err
+			} else {
+				m.localError = nil
+			}
+
+		case "c":
+			if len(m.local.selectedPaths()) == 0 {
+				return m, nil
+			}
+
+			m.localConfirm = true
+		}
+	}
+
+	return m, nil
+}
+
+func (m model) updateLocalConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "y", "enter":
+			m.localConfirm = false
+			return m, nil
+
+		case "n", "esc":
+			m.localConfirm = false
+		}
+	}
+
+	return m, nil
+}
+
+func (m model) localView() string {
+	if m.localError != nil {
+		return fmt.Sprintf(
+			"Add files\n\nError: %v\n\nEsc: back",
+			m.localError,
+		)
+	}
+
+	var s string
+
+	s += "Add files to YP-Z5\n\n"
+	s += fmt.Sprintf("Local path: %s\n", m.local.path)
+	s += fmt.Sprintf("Destination: %s\n\n", m.path)
+
+	// s += fmt.Sprintf(
+	// 	"DEBUG cursor=%d selected=%d currentSelected=%v\n\n",
+	// 	m.local.cursor,
+	// 	len(m.local.selectedPaths()),
+	// 	func() bool {
+	// 		entry := m.local.current()
+	// 		return entry != nil && entry.selected
+	// 	}(),
+	// )
+
+	for i, entry := range m.local.entries {
+		cursor := "  "
+
+		if i == m.local.cursor {
+			cursor = "> "
+		}
+
+		selected := " "
+
+		// if m.local.selections[entry.path] {
+		// 	selected = "*"
+		// }
+		if entry.selected {
+			selected = "*"
+		}
+
+		kind := "FILE"
+
+		if entry.isDir {
+			kind = "DIR "
+		}
+
+		s += fmt.Sprintf(
+			"%s[%s] %-4s %-40s",
+			cursor,
+			selected,
+			kind,
+			entry.name,
+		)
+
+		if !entry.isDir {
+			s += fmt.Sprintf(" %d", entry.size)
+		}
+
+		s += "\n"
+	}
+
+	s += fmt.Sprintf(
+		"\nSelected: %d",
+		len(m.local.selectedPaths()),
+	)
+
+	s += "\n\n↑/↓: navigate   Space: select   Enter: open"
+	s += "\nBackspace/h: parent   c: copy   Esc: cancel\n"
+
+	if m.localConfirm {
+		s += "\n"
+		s += "Copy selected items to "
+		s += m.path
+		s += "?\n"
+		s += "y/Enter: confirm   n/Esc: cancel\n"
+	}
+
+	return s
+}
+
+func joinPath(parent, name string) string {
+	if parent == "/" {
+		return "/" + name
+	}
+
+	return parent + "/" + name
 }
 
 func main() {
