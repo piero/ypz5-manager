@@ -1,6 +1,7 @@
-// Package testimage gives tests a writable copy of the YP-Z5 disk image
-// named by the YP_Z5_IMAGE environment variable. Tests using it are
-// skipped when the variable is not set.
+// Package testimage gives tests a writable copy of the FAT32 disk image
+// named by the YP_Z5_IMAGE environment variable: a YP-Z5 dump or any
+// other FAT32 image. Tests using it are skipped when the variable is not
+// set.
 package testimage
 
 import (
@@ -13,7 +14,7 @@ import (
 	"github.com/piero/ypz5/internal/storage"
 )
 
-// Open opens a writable clone of the YP-Z5 image through the same
+// Open opens a writable clone of the image through the same
 // storage layer the TUI uses. The original image is never written.
 func Open(t *testing.T) *fat32.Filesystem {
 	t.Helper()
@@ -51,6 +52,7 @@ func Open(t *testing.T) *fat32.Filesystem {
 	return fs
 }
 
+// WriteTree creates files (path → contents) under root.
 func WriteTree(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 

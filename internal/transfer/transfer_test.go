@@ -90,9 +90,15 @@ func TestCopyToImage(t *testing.T) {
 		"New Album/.DS_Store":       "junk",
 	})
 
+	const dest = "/YPZ5 Transfer Test"
+
+	if err := fs.Mkdir(dest); err != nil {
+		t.Fatal(err)
+	}
+
 	freeBefore, _ := fs.FreeClusters()
 
-	plan, err := PlanCopy([]string{filepath.Join(root, "New Album")}, "/Music", fs.BytesPerCluster())
+	plan, err := PlanCopy([]string{filepath.Join(root, "New Album")}, dest, fs.BytesPerCluster())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +118,7 @@ func TestCopyToImage(t *testing.T) {
 		}
 	}
 
-	got, err := fs.ReadFile("/Music/New Album/01 - First.mp3")
+	got, err := fs.ReadFile(dest + "/New Album/01 - First.mp3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +127,7 @@ func TestCopyToImage(t *testing.T) {
 		t.Fatal("copied file contents differ")
 	}
 
-	if _, err := fs.Lookup("/Music/New Album/.DS_Store"); err == nil {
+	if _, err := fs.Lookup(dest + "/New Album/.DS_Store"); err == nil {
 		t.Fatal(".DS_Store was copied")
 	}
 

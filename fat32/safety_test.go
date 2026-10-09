@@ -9,145 +9,6 @@ import (
 	"time"
 )
 
-// checkConsistency verifies the whole filesystem the way fsck would:
-// FAT copies are identical, every chain is valid, no cluster belongs to
-// two owners, no allocated cluster is unreferenced, file sizes match
-// their chains and the FSInfo free count is exact.
-func checkConsistency(t *testing.T, fs *Filesystem) {
-	t.Helper()
-
-	maxCluster := fs.boot.MaxCluster()
-	fatBytes := int64(fs.boot.SectorsPerFAT) * int64(fs.boot.BytesPerSector)
-
-	fats := make([][]byte, fs.boot.NumberOfFATs)
-
-	for i := range fats {
-		fats[i] = make([]byte, fatBytes)
-
-		if _, err := fs.reader.ReadAt(
-			fats[i],
-			fs.layout.FATOffset+int64(i)*fatBytes,
-		); err != nil {
-			t.Fatalf("read FAT %d: %v", i, err)
-		}
-
-		if i > 0 && !bytes.Equal(fats[0], fats[i]) {
-			t.Fatalf("FAT %d differs from FAT 0", i)
-		}
-	}
-
-	entry := func(cluster uint32) uint32 {
-		return binary.LittleEndian.Uint32(fats[0][cluster*4:]) & 0x0FFFFFFF
-	}
-
-	owners := make(map[uint32]string)
-
-	claim := func(start uint32, owner string) int {
-		chain, err := fs.readClusterChain(start)
-		if err != nil {
-			t.Fatalf("%s: %v", owner, err)
-		}
-
-		for _, cluster := range chain {
-			if cluster > maxCluster {
-				t.Fatalf("%s: cluster %d beyond end of volume", owner, cluster)
-			}
-
-			if previous, exists := owners[cluster]; exists {
-				t.Fatalf(
-					"cluster %d is shared by %s and %s",
-					cluster,
-					previous,
-					owner,
-				)
-			}
-
-			owners[cluster] = owner
-		}
-
-		return len(chain)
-	}
-
-	var walk func(cluster uint32, path string)
-
-	walk = func(cluster uint32, path string) {
-		claim(cluster, path)
-
-		entries, err := fs.readDirectory(cluster)
-		if err != nil {
-			t.Fatalf("read directory %s: %v", path, err)
-		}
-
-		for _, child := range entries {
-			if child.Name == "." || child.Name == ".." {
-				continue
-			}
-
-			childPath := path + "/" + child.Name
-
-			if child.IsDir {
-				walk(child.StartCluster, childPath)
-				continue
-			}
-
-			if child.StartCluster == 0 {
-				if child.Size != 0 {
-					t.Fatalf("%s: size %d without clusters", childPath, child.Size)
-				}
-
-				continue
-			}
-
-			got := claim(child.StartCluster, childPath)
-			want := fs.clustersForSize(int(child.Size))
-
-			if got != want {
-				t.Fatalf(
-					"%s: chain has %d clusters, size needs %d",
-					childPath,
-					got,
-					want,
-				)
-			}
-		}
-	}
-
-	walk(fs.boot.RootCluster, "")
-
-	var free uint32
-
-	for cluster := uint32(2); cluster <= maxCluster; cluster++ {
-		value := entry(cluster)
-
-		if value == 0 {
-			free++
-			continue
-		}
-
-		if value == fat32BadCluster {
-			continue
-		}
-
-		if _, ok := owners[cluster]; !ok {
-			t.Fatalf("cluster %d is allocated but unreferenced", cluster)
-		}
-	}
-
-	if !fs.info.present {
-		return
-	}
-
-	buf := make([]byte, sectorSize)
-
-	if _, err := fs.reader.ReadAt(buf, fs.info.offset); err != nil {
-		t.Fatalf("read FSInfo: %v", err)
-	}
-
-	if got := binary.LittleEndian.Uint32(buf[fsInfoFreeCountOffset:]); got != free {
-		t.Fatalf("FSInfo free count = %d, actual free clusters = %d", got, free)
-	}
-}
-
 func TestGenerateShortNameUsesLastDotAndSanitizes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -262,7 +123,7 @@ func TestYPZ5WriteFileRejectsInvalidName(t *testing.T) {
 
 	before, _ := fs.FreeClusters()
 
-	if err := fs.WriteFile("/Music/a:b.mp3", []byte("x")); err == nil {
+	if err := fs.WriteFile("/YPZ5 a:b.mp3", []byte("x")); err == nil {
 		t.Fatal("WriteFile with invalid name unexpectedly succeeded")
 	}
 
@@ -287,11 +148,11 @@ func TestYPZ5FSInfoTracksAllocations(t *testing.T) {
 
 	data := bytes.Repeat([]byte("x"), int(fs.BytesPerCluster())*3+1)
 
-	if err := fs.Mkdir("/Music/FSInfo Test"); err != nil {
+	if err := fs.Mkdir("/YPZ5 FSInfo Test"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fs.WriteFile("/Music/FSInfo Test/Song.mp3", data); err != nil {
+	if err := fs.WriteFile("/YPZ5 FSInfo Test/Song.mp3", data); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,7 +162,7 @@ func TestYPZ5FSInfoTracksAllocations(t *testing.T) {
 
 	checkConsistency(t, fs)
 
-	if err := fs.RemoveAll("/Music/FSInfo Test"); err != nil {
+	if err := fs.RemoveAll("/YPZ5 FSInfo Test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -337,54 +198,18 @@ func TestYPZ5FSInfoStaleCountIsCorrected(t *testing.T) {
 		t.Fatalf("free clusters = %d, want %d", got, want)
 	}
 
-	if err := fs.Mkdir("/Stale"); err != nil {
+	if err := fs.Mkdir("/YPZ5 Stale"); err != nil {
 		t.Fatal(err)
 	}
 
 	checkConsistency(t, fs)
 }
 
-func TestYPZ5ProtectedEntriesCannotBeRemoved(t *testing.T) {
-	_, fs := openYPZ5WriteImage(t)
+// setAttr sets attribute bits on the entry at path.
+func setAttr(t *testing.T, fs *Filesystem, path string, attr uint8) {
+	t.Helper()
 
-	for _, path := range []string{"/System", "/DevIcon.fil", "/DevLogo.fil"} {
-		if err := fs.RemoveAll(path); !errors.Is(err, ErrProtected) {
-			t.Fatalf("RemoveAll(%q) error = %v, want ErrProtected", path, err)
-		}
-
-		if _, err := fs.Lookup(path); err != nil {
-			t.Fatalf("%s missing after refused delete: %v", path, err)
-		}
-	}
-
-	if err := fs.Delete("/DevIcon.fil"); !errors.Is(err, ErrProtected) {
-		t.Fatalf("Delete error = %v, want ErrProtected", err)
-	}
-
-	if err := fs.ReplaceFile("/DevIcon.fil", []byte("x")); !errors.Is(err, ErrProtected) {
-		t.Fatalf("ReplaceFile error = %v, want ErrProtected", err)
-	}
-
-	checkConsistency(t, fs)
-}
-
-// TestYPZ5RemoveAllChecksWholeTreeFirst verifies that a directory holding
-// a protected entry is left completely untouched.
-func TestYPZ5RemoveAllChecksWholeTreeFirst(t *testing.T) {
-	_, fs := openYPZ5WriteImage(t)
-
-	if err := fs.Mkdir("/Tree"); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, name := range []string{"/Tree/a.txt", "/Tree/b.txt"} {
-		if err := fs.WriteFile(name, []byte(name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Mark b.txt read-only.
-	record, err := fs.findDirectoryRecord("/Tree/b.txt")
+	record, err := fs.findDirectoryRecord(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,23 +221,94 @@ func TestYPZ5RemoveAllChecksWholeTreeFirst(t *testing.T) {
 
 	var short [32]byte
 	copy(short[:], cluster[record.Short.Offset:])
-	short[0x0B] |= AttrReadOnly
+	short[0x0B] |= attr
 
 	if err := fs.writeDirectoryEntry(record.Short, short); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	if err := fs.RemoveAll("/Tree"); !errors.Is(err, ErrProtected) {
+// TestYPZ5ProtectedEntriesCannotBeRemoved checks read-only and system
+// entries created by the test, and any protected entries already in the
+// image's root (on the YP-Z5: System, DevIcon.fil and DevLogo.fil).
+func TestYPZ5ProtectedEntriesCannotBeRemoved(t *testing.T) {
+	_, fs := openYPZ5WriteImage(t)
+
+	dir := testDir(t, fs, "YPZ5 Protected")
+	readOnly := dir + "/read-only.txt"
+	system := dir + "/System Folder"
+
+	if err := fs.WriteFile(readOnly, []byte("keep")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Mkdir(system); err != nil {
+		t.Fatal(err)
+	}
+
+	setAttr(t, fs, readOnly, AttrReadOnly)
+	setAttr(t, fs, system, AttrSystem)
+
+	protected := []string{readOnly, system}
+
+	root, err := fs.ReadDir("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, entry := range root {
+		if entry.Protected() {
+			protected = append(protected, "/"+entry.Name)
+		}
+	}
+
+	for _, path := range protected {
+		if err := fs.RemoveAll(path); !errors.Is(err, ErrProtected) {
+			t.Fatalf("RemoveAll(%q) error = %v, want ErrProtected", path, err)
+		}
+
+		if _, err := fs.Lookup(path); err != nil {
+			t.Fatalf("%s missing after refused delete: %v", path, err)
+		}
+	}
+
+	if err := fs.Delete(readOnly); !errors.Is(err, ErrProtected) {
+		t.Fatalf("Delete error = %v, want ErrProtected", err)
+	}
+
+	if err := fs.ReplaceFile(readOnly, []byte("x")); !errors.Is(err, ErrProtected) {
+		t.Fatalf("ReplaceFile error = %v, want ErrProtected", err)
+	}
+
+	checkConsistency(t, fs)
+}
+
+// TestYPZ5RemoveAllChecksWholeTreeFirst verifies that a directory holding
+// a protected entry is left completely untouched.
+func TestYPZ5RemoveAllChecksWholeTreeFirst(t *testing.T) {
+	_, fs := openYPZ5WriteImage(t)
+
+	dir := testDir(t, fs, "YPZ5 Tree")
+
+	for _, name := range []string{dir + "/a.txt", dir + "/b.txt"} {
+		if err := fs.WriteFile(name, []byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setAttr(t, fs, dir+"/b.txt", AttrReadOnly)
+
+	if err := fs.RemoveAll(dir); !errors.Is(err, ErrProtected) {
 		t.Fatalf("RemoveAll error = %v, want ErrProtected", err)
 	}
 
-	entries, err := fs.ReadDir("/Tree")
+	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if len(entries) != 2 {
-		t.Fatalf("/Tree has %d entries after refused delete, want 2", len(entries))
+		t.Fatalf("%s has %d entries after refused delete, want 2", dir, len(entries))
 	}
 
 	checkConsistency(t, fs)
@@ -449,15 +345,15 @@ func TestYPZ5NewEntriesHaveTimestamps(t *testing.T) {
 	created := time.Date(2026, 10, 9, 18, 30, 16, 0, time.Local) // even: FAT has 2 s resolution
 	fs.clock = func() time.Time { return created }
 
-	if err := fs.Mkdir("/Music/Dated"); err != nil {
+	if err := fs.Mkdir("/YPZ5 Dated"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fs.WriteFile("/Music/Dated/Song.mp3", []byte("v1")); err != nil {
+	if err := fs.WriteFile("/YPZ5 Dated/Song.mp3", []byte("v1")); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, path := range []string{"/Music/Dated", "/Music/Dated/Song.mp3"} {
+	for _, path := range []string{"/YPZ5 Dated", "/YPZ5 Dated/Song.mp3"} {
 		entry, err := fs.Lookup(path)
 		if err != nil {
 			t.Fatal(err)
@@ -471,11 +367,11 @@ func TestYPZ5NewEntriesHaveTimestamps(t *testing.T) {
 	modified := created.Add(time.Hour)
 	fs.clock = func() time.Time { return modified }
 
-	if err := fs.ReplaceFile("/Music/Dated/Song.mp3", []byte("v2")); err != nil {
+	if err := fs.ReplaceFile("/YPZ5 Dated/Song.mp3", []byte("v2")); err != nil {
 		t.Fatal(err)
 	}
 
-	record, err := fs.findDirectoryRecord("/Music/Dated/Song.mp3")
+	record, err := fs.findDirectoryRecord("/YPZ5 Dated/Song.mp3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +403,14 @@ func TestYPZ5NewEntriesHaveTimestamps(t *testing.T) {
 func TestYPZ5DamagedLFNFallsBackToShortName(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const path = "/Music/Iron Maiden/01 - Prowler.mp3"
+	dir := testDir(t, fs, "YPZ5 Damaged LFN")
+	path := dir + "/01 - A Long File Name.mp3"
+
+	for _, name := range []string{path, dir + "/02 - Another Track.mp3"} {
+		if err := fs.WriteFile(name, []byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	record, err := fs.findDirectoryRecord(path)
 	if err != nil {
@@ -534,7 +437,7 @@ func TestYPZ5DamagedLFNFallsBackToShortName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := fs.ReadDir("/Music/Iron Maiden")
+	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("directory with a damaged LFN is unreadable: %v", err)
 	}
@@ -550,15 +453,15 @@ func TestYPZ5DamagedLFNFallsBackToShortName(t *testing.T) {
 		t.Fatalf("8.3 name %q not listed:\n%s", record.Entry.ShortName, joined)
 	}
 
-	if strings.Contains(joined, "01 - Prowler.mp3") {
+	if strings.Contains(joined, "01 - A Long File Name.mp3") {
 		t.Fatal("damaged long name is still listed")
 	}
 
-	if _, err := fs.ReadFile("/Music/Iron Maiden/" + record.Entry.ShortName); err != nil {
+	if _, err := fs.ReadFile(dir + "/" + record.Entry.ShortName); err != nil {
 		t.Fatalf("file unreadable under its 8.3 name: %v", err)
 	}
 
-	if err := fs.WriteFile("/Music/Iron Maiden/New.mp3", []byte("new")); err != nil {
+	if err := fs.WriteFile(dir+"/New.mp3", []byte("new")); err != nil {
 		t.Fatalf("directory with a damaged LFN is not writable: %v", err)
 	}
 }

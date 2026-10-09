@@ -10,13 +10,91 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
-const (
-	ypz5PartitionOffset int64 = 16384
-	ypz5PartitionSize   int64 = 2028355584
-)
+// The YP-Z5 integration tests run against any FAT32 image named by
+// YP_Z5_IMAGE: a whole disk with an MBR or a bare partition. They create
+// the files and directories they need and only assume that the image is
+// a consistent FAT32 filesystem, so other images work as well as the
+// YP-Z5 dump they were first written for.
+
+// imagePartition returns where the filesystem lies in the image file.
+func imagePartition(t *testing.T, file *os.File) (offset, size int64) {
+	t.Helper()
+
+	offset, err := PartitionOffset(file)
+	if err != nil {
+		t.Fatalf("find FAT32 filesystem in image: %v", err)
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return offset, info.Size() - offset
+}
+
+// testDir creates a directory at the root for a test's files.
+func testDir(t *testing.T, fs *Filesystem, name string) string {
+	t.Helper()
+
+	path := "/" + name
+
+	if err := fs.Mkdir(path); err != nil {
+		t.Fatalf("Mkdir(%q): %v", path, err)
+	}
+
+	return path
+}
+
+// walkImage calls visit for every entry on the image, depth first.
+func walkImage(t *testing.T, fs *Filesystem, visit func(path string, entry DirectoryEntry)) {
+	t.Helper()
+
+	var walk func(dir string)
+
+	walk = func(dir string) {
+		entries, err := fs.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir(%q): %v", dir, err)
+		}
+
+		for _, entry := range entries {
+			path := strings.TrimSuffix(dir, "/") + "/" + entry.Name
+
+			visit(path, entry)
+
+			if entry.IsDir {
+				walk(path)
+			}
+		}
+	}
+
+	walk("/")
+}
+
+// existingFiles returns up to limit regular, unprotected, non-empty files
+// already on the image, skipping the test when there are none.
+func existingFiles(t *testing.T, fs *Filesystem, limit int) []string {
+	t.Helper()
+
+	var paths []string
+
+	walkImage(t, fs, func(path string, entry DirectoryEntry) {
+		if len(paths) < limit && !entry.IsDir && !entry.Protected() && entry.Size > 0 {
+			paths = append(paths, path)
+		}
+	})
+
+	if len(paths) == 0 {
+		t.Skip("the image contains no regular files")
+	}
+
+	return paths
+}
 
 type partitionWriter struct {
 	file   *os.File
@@ -65,11 +143,8 @@ func openYPZ5Image(t *testing.T) (*os.File, *Filesystem) {
 		}
 	})
 
-	partition := io.NewSectionReader(
-		file,
-		ypz5PartitionOffset,
-		ypz5PartitionSize,
-	)
+	offset, size := imagePartition(t, file)
+	partition := io.NewSectionReader(file, offset, size)
 
 	fs := New(partition)
 
@@ -127,16 +202,13 @@ func openYPZ5WriteImageWithPath(t *testing.T) (string, *os.File, *Filesystem) {
 		t.Fatalf("open test image: %v", err)
 	}
 
-	partition := io.NewSectionReader(
-		destination,
-		ypz5PartitionOffset,
-		ypz5PartitionSize,
-	)
+	offset, size := imagePartition(t, destination)
+	partition := io.NewSectionReader(destination, offset, size)
 
 	writer := &partitionWriter{
 		file:   destination,
-		offset: ypz5PartitionOffset,
-		size:   ypz5PartitionSize,
+		offset: offset,
+		size:   size,
 	}
 
 	fs := NewReadWrite(partition, writer)
@@ -149,6 +221,12 @@ func openYPZ5WriteImageWithPath(t *testing.T) (string, *os.File, *Filesystem) {
 	t.Cleanup(func() {
 		_ = destination.Close()
 	})
+
+	// The consistency check after the test is only meaningful if the
+	// image was consistent to begin with.
+	if err := consistencyError(fs, false); err != nil {
+		t.Skipf("test image is not consistent; repair it first (e.g. with fsck_msdos): %v", err)
+	}
 
 	// Every mutating test must leave a consistent filesystem. Cleanups
 	// run in reverse order, so this runs before the image is closed.
@@ -222,152 +300,132 @@ func cloneYPZ5Image(t *testing.T, sourcePath, destinationPath string) {
 	}
 }
 
-// Verifies the FAT32 geometry and root directory of the YP-Z5 image.
+// Verifies that the boot sector describes a valid, self-consistent
+// FAT32 volume and that the root directory can be read.
 func TestYPZ5Filesystem(t *testing.T) {
 	_, fs := openYPZ5Image(t)
 
-	if got := fs.BootSector().BytesPerSector; got != 512 {
-		t.Fatalf("BytesPerSector = %d, want 512", got)
-	}
+	boot := fs.BootSector()
 
-	if got := fs.BootSector().SectorsPerCluster; got != 8 {
-		t.Fatalf("SectorsPerCluster = %d, want 8", got)
-	}
-
-	if got := fs.BootSector().NumberOfFATs; got != 2 {
-		t.Fatalf("NumberOfFATs = %d, want 2", got)
-	}
-
-	if got := fs.BootSector().SectorsPerFAT; got != 3862 {
-		t.Fatalf("SectorsPerFAT = %d, want 3862", got)
-	}
-
-	if got := fs.RootCluster(); got != 2 {
-		t.Fatalf("RootCluster = %d, want 2", got)
-	}
-
-	entries, err := fs.ReadDir("/")
-	if err != nil {
-		t.Fatalf("ReadDir(/): %v", err)
-	}
-
-	if len(entries) == 0 {
-		t.Fatal("root directory is unexpectedly empty")
-	}
-}
-
-// Verifies that the existing Music directory can be resolved and listed.
-func TestYPZ5MusicDirectory(t *testing.T) {
-	_, fs := openYPZ5Image(t)
-
-	entries, err := fs.ReadDir("/Music")
-	if err != nil {
-		t.Fatalf("ReadDir(/Music): %v", err)
-	}
-
-	if len(entries) == 0 {
-		t.Fatal("/Music directory is unexpectedly empty")
-	}
-
-	var foundCartoni bool
-
-	for _, entry := range entries {
-		if entry.Name == "Cartoni animati" {
-			foundCartoni = true
-
-			if !entry.IsDir {
-				t.Fatal(`"Cartoni animati" is not a directory`)
-			}
-		}
-	}
-
-	if !foundCartoni {
-		t.Fatal(`"/Music" does not contain "Cartoni animati"`)
-	}
-}
-
-// Verifies that the existing long filename and its contents can be read.
-func TestYPZ5PollonFile(t *testing.T) {
-	_, fs := openYPZ5Image(t)
-
-	const path = "/Music/Cartoni animati/Pollon.mp3"
-
-	entry, err := fs.Lookup(path)
-	if err != nil {
-		t.Fatalf("Lookup(%q): %v", path, err)
-	}
-
-	if entry.IsDir {
-		t.Fatalf("%q is unexpectedly a directory", path)
-	}
-
-	const expectedSize uint32 = 2801048
-
-	if entry.Size != expectedSize {
-		t.Fatalf(
-			"%q size = %d, want %d",
-			path,
-			entry.Size,
-			expectedSize,
-		)
-	}
-
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", path, err)
-	}
-
-	if uint32(len(data)) != expectedSize {
-		t.Fatalf(
-			"ReadFile(%q) returned %d bytes, want %d",
-			path,
-			len(data),
-			expectedSize,
-		)
-	}
-
-	if len(data) < 4 {
-		t.Fatal("Pollon.mp3 is unexpectedly short")
-	}
-
-	if bytes.Equal(data[:4], []byte{0, 0, 0, 0}) {
-		t.Fatal("Pollon.mp3 begins with four zero bytes")
-	}
-}
-
-// Verifies that the known Pollon cluster chain is read correctly.
-func TestYPZ5PollonClusterChain(t *testing.T) {
-	_, fs := openYPZ5Image(t)
-
-	entry, err := fs.Lookup("/Music/Cartoni animati/Pollon.mp3")
-	if err != nil {
+	if err := boot.Validate(); err != nil {
 		t.Fatal(err)
 	}
 
-	chain, err := fs.ClusterChain(entry.StartCluster)
-	if err != nil {
-		t.Fatalf("ClusterChain: %v", err)
+	switch boot.BytesPerSector {
+	case 512, 1024, 2048, 4096:
+	default:
+		t.Fatalf("BytesPerSector = %d, want 512, 1024, 2048 or 4096", boot.BytesPerSector)
 	}
 
-	if len(chain) != 684 {
-		t.Fatalf(
-			"Pollon cluster chain length = %d, want 684",
-			len(chain),
-		)
+	if spc := boot.SectorsPerCluster; spc&(spc-1) != 0 {
+		t.Fatalf("SectorsPerCluster = %d, want a power of two", spc)
 	}
 
-	if chain[0] != 188294 {
-		t.Fatalf(
-			"Pollon first cluster = %d, want 188294",
-			chain[0],
-		)
+	// FAT32 volumes have at least 65525 clusters, and each FAT copy
+	// must have an entry for every one of them.
+	if clusters := boot.ClusterCount(); clusters < 65525 {
+		t.Fatalf("ClusterCount = %d, too few for FAT32", clusters)
 	}
 
-	if chain[len(chain)-1] != 188977 {
-		t.Fatalf(
-			"Pollon last cluster = %d, want 188977",
-			chain[len(chain)-1],
-		)
+	fatEntries := int64(boot.SectorsPerFAT) * int64(boot.BytesPerSector) / 4
+
+	if int64(boot.MaxCluster()) >= fatEntries {
+		t.Fatalf("FAT has %d entries, volume needs %d", fatEntries, boot.MaxCluster()+1)
+	}
+
+	if _, err := fs.ReadDir("/"); err != nil {
+		t.Fatalf("ReadDir(/): %v", err)
+	}
+}
+
+// Verifies that the image passes the same consistency check that every
+// mutating test runs afterwards.
+func TestYPZ5ImageIsConsistent(t *testing.T) {
+	_, fs := openYPZ5Image(t)
+
+	if err := consistencyError(fs, false); err != nil {
+		t.Fatalf("image is not consistent; repair it first (e.g. with fsck_msdos): %v", err)
+	}
+}
+
+// Verifies that every directory on the image can be read, and that each
+// entry resolves back to itself by path.
+func TestYPZ5ReadsEveryDirectory(t *testing.T) {
+	_, fs := openYPZ5Image(t)
+
+	count := 0
+
+	walkImage(t, fs, func(path string, entry DirectoryEntry) {
+		count++
+
+		got, err := fs.Lookup(path)
+		if err != nil {
+			t.Fatalf("Lookup(%q): %v", path, err)
+		}
+
+		if got.StartCluster != entry.StartCluster || got.IsDir != entry.IsDir {
+			t.Fatalf("Lookup(%q) = %+v, listed as %+v", path, got, entry)
+		}
+	})
+
+	t.Logf("checked %d entries", count)
+}
+
+// Verifies that existing files read back with the length and cluster
+// chain their directory entries promise, and, when mtools is installed,
+// with the same contents mtools reads.
+func TestYPZ5ReadsExistingFiles(t *testing.T) {
+	imageFile, fs := openYPZ5Image(t)
+
+	paths := existingFiles(t, fs, 20)
+
+	for _, path := range paths {
+		entry, err := fs.Lookup(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+
+		if uint32(len(data)) != entry.Size {
+			t.Fatalf("ReadFile(%q) returned %d bytes, want %d", path, len(data), entry.Size)
+		}
+
+		chain, err := fs.ClusterChain(entry.StartCluster)
+		if err != nil {
+			t.Fatalf("ClusterChain(%q): %v", path, err)
+		}
+
+		if want := fs.clustersForSize(int(entry.Size)); len(chain) != want {
+			t.Fatalf("%q: chain has %d clusters, size needs %d", path, len(chain), want)
+		}
+	}
+
+	if _, err := exec.LookPath("mtype"); err != nil {
+		t.Logf("mtools not installed, contents not cross-checked: %v", err)
+		return
+	}
+
+	offset, _ := imagePartition(t, imageFile)
+	imageSpec := imageFile.Name() + "@@" + fmt.Sprint(offset)
+
+	for _, path := range paths[:min(len(paths), 5)] {
+		want, err := exec.Command("mtype", "-i", imageSpec, "::"+path).Output()
+		if err != nil {
+			t.Fatalf("mtype %q: %v", path, err)
+		}
+
+		got, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%q: contents differ from mtools", path)
+		}
 	}
 }
 
@@ -375,7 +433,7 @@ func TestYPZ5PollonClusterChain(t *testing.T) {
 func TestYPZ5WriteFileLifecycle(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const path = "/Music/Cartoni animati/YPZ5 test file.txt"
+	path := testDir(t, fs, "YPZ5 Tests") + "/YPZ5 test file.txt"
 
 	content := []byte("YP-Z5 FAT32 write test")
 
@@ -422,7 +480,7 @@ func TestYPZ5WriteFileLifecycle(t *testing.T) {
 func TestYPZ5UnicodeLongFilename(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const path = "/Music/Cartoni animati/Prova Unicode 🚀 日本語.txt"
+	path := testDir(t, fs, "YPZ5 Tests") + "/Prova Unicode 🚀 日本語.txt"
 
 	content := []byte("unicode filename test")
 
@@ -457,11 +515,12 @@ func TestYPZ5UnicodeLongFilename(t *testing.T) {
 	}
 }
 
-// Replaces an existing YP-Z5 file and verifies that its old data clusters are released.
+// Replaces a file already on the image and verifies that its old data
+// clusters are released.
 func TestYPZ5ReplaceFile(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const path = "/BOOTEX.LOG"
+	path := existingFiles(t, fs, 1)[0]
 
 	before, err := fs.Lookup(path)
 	if err != nil {
@@ -469,7 +528,7 @@ func TestYPZ5ReplaceFile(t *testing.T) {
 	}
 
 	if before.IsDir {
-		t.Fatal("BOOTEX.LOG is unexpectedly a directory")
+		t.Fatalf("%q is unexpectedly a directory", path)
 	}
 
 	oldChain, err := fs.ClusterChain(before.StartCluster)
@@ -513,7 +572,7 @@ func TestYPZ5ReplaceFile(t *testing.T) {
 
 		if !free {
 			t.Fatalf(
-				"old BOOTEX.LOG cluster %d is still allocated",
+				"old cluster %d is still allocated",
 				cluster,
 			)
 		}
@@ -535,7 +594,7 @@ func TestYPZ5ReplaceFile(t *testing.T) {
 func TestYPZ5DirectoryLifecycle(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const directory = "/Music/YPZ5 Test Directory"
+	const directory = "/YPZ5 Test Directory"
 
 	if err := fs.Mkdir(directory); err != nil {
 		t.Fatalf("Mkdir: %v", err)
@@ -584,7 +643,7 @@ func TestYPZ5DirectoryLifecycle(t *testing.T) {
 func TestYPZ5DirectoryExpansion(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const directory = "/Music/YPZ5 Expansion Test"
+	const directory = "/YPZ5 Expansion Test"
 
 	if err := fs.Mkdir(directory); err != nil {
 		t.Fatalf("Mkdir: %v", err)
@@ -650,7 +709,7 @@ func TestYPZ5DirectoryExpansion(t *testing.T) {
 func TestYPZ5DirectoryExpansionChain(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const directory = "/Music/YPZ5 Expansion Chain"
+	const directory = "/YPZ5 Expansion Chain"
 
 	if err := fs.Mkdir(directory); err != nil {
 		t.Fatalf("Mkdir: %v", err)
@@ -693,7 +752,7 @@ func TestYPZ5DirectoryExpansionChain(t *testing.T) {
 func TestYPZ5DirectoryExpansionReuse(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const directory = "/Music/YPZ5 Expansion Reuse"
+	const directory = "/YPZ5 Expansion Reuse"
 
 	if err := fs.Mkdir(directory); err != nil {
 		t.Fatalf("Mkdir: %v", err)
@@ -794,7 +853,7 @@ func TestYPZ5DirectoryExpansionReuse(t *testing.T) {
 func TestYPZ5DirectoryExpansionGeometry(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const directory = "/Music/YPZ5 Expansion Geometry"
+	const directory = "/YPZ5 Expansion Geometry"
 
 	if err := fs.Mkdir(directory); err != nil {
 		t.Fatalf("Mkdir: %v", err)
@@ -845,7 +904,7 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 	imagePath, file, fs := openYPZ5WriteImageWithPath(t)
 
 	const (
-		directory   = "/Music/YPZ5 End-to-End"
+		directory   = "/YPZ5 End-to-End"
 		asciiFile   = directory + "/hello.txt"
 		unicodeFile = directory + "/Caffè 🚀 日本語.txt"
 	)
@@ -902,11 +961,8 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 		t.Fatalf("reopen test image: %v", err)
 	}
 
-	partition := io.NewSectionReader(
-		reopened,
-		ypz5PartitionOffset,
-		ypz5PartitionSize,
-	)
+	reopenedOffset, reopenedSize := imagePartition(t, reopened)
+	partition := io.NewSectionReader(reopened, reopenedOffset, reopenedSize)
 
 	reopenedFS := New(partition)
 
@@ -948,7 +1004,7 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 		t.Skipf("mtools mtype not installed: %v", err)
 	}
 
-	imageSpec := imagePath + "@@" + fmt.Sprint(ypz5PartitionOffset)
+	imageSpec := imagePath + "@@" + fmt.Sprint(reopenedOffset)
 
 	cmd := exec.Command(
 		"mdir",
@@ -1019,7 +1075,7 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 func TestYPZ5FATCopiesStayInSync(t *testing.T) {
 	_, fs := openYPZ5WriteImage(t)
 
-	const path = "/Music/Cartoni animati/YPZ5 FAT copy test.txt"
+	path := testDir(t, fs, "YPZ5 Tests") + "/YPZ5 FAT copy test.txt"
 
 	content := []byte("FAT copy synchronization test")
 

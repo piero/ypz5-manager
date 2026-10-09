@@ -234,27 +234,40 @@ Unit tests need no setup:
 go test ./...
 ```
 
-The YP-Z5 integration tests are skipped unless `YP_Z5_IMAGE` points at a
-full device image. Run from the repository root:
+The integration tests are skipped unless `YP_Z5_IMAGE` points at a disk
+image. Run from the repository root:
 
 ```sh
 YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test ./...
 ```
 
+- Any consistent FAT32 image works, not only a YP-Z5 dump: a whole disk
+  with an MBR or a bare partition. The partition is found automatically,
+  the tests create the files and folders they need (at the root, named
+  `YPZ5 …`), and tests that need existing files use whatever the image
+  contains, skipping when it has none.
 - The path must be absolute (hence `$PWD`): `go test` runs each package
   from its own directory, so a relative path would not be found.
-- The image may be read-only. Each mutating test works on its own copy
-  (an APFS clone on macOS) in a temporary directory, and checks that the
-  filesystem is still consistent afterwards.
-- The tests assume the partition starts at byte 16384 and is
-  2,028,355,584 bytes long (`fat32/filesystem_ypz5_test.go`).
-- Some tests expect specific files on the device, e.g.
-  `Music/Cartoni animati/Pollon.mp3`.
+- The image may be read-only and is never modified. Each mutating test
+  works on its own copy (an APFS clone on macOS) in a temporary
+  directory, and checks that the filesystem is still consistent
+  afterwards.
+- If the image itself is damaged (lost or cross-linked clusters),
+  `TestYPZ5ImageIsConsistent` fails and the mutating tests are skipped:
+  repair the image first, e.g. with `fsck_msdos`.
+
+To create a small test image without a device (mtools):
+
+```sh
+mformat -C -F -T 163840 -h 16 -s 32 -c 1 -i /tmp/test.img ::
+mcopy -s -i /tmp/test.img ~/Music/SomeAlbum ::/
+YP_Z5_IMAGE=/tmp/test.img go test ./...
+```
 
 Useful variations:
 
 ```sh
-# only the YP-Z5 tests, verbose
+# only the image tests in fat32, verbose
 YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test ./fat32 -run YPZ5 -v
 
 # ignore cached results, e.g. after replacing the image
