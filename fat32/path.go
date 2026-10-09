@@ -1,9 +1,13 @@
 package fat32
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrNotFound is returned when a path does not exist.
+var ErrNotFound = errors.New("entry not found")
 
 func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 	if path == "/" {
@@ -138,7 +142,8 @@ func (fs *Filesystem) findEntry(path string) (DirectoryEntry, error) {
 
 		if !found {
 			return DirectoryEntry{}, fmt.Errorf(
-				"entry not found: %s",
+				"%w: %s",
+				ErrNotFound,
 				path,
 			)
 		}
@@ -269,7 +274,8 @@ func (fs *Filesystem) findDirectoryRecord(
 
 		if !found {
 			return directoryRecord{}, fmt.Errorf(
-				"entry not found: %s",
+				"%w: %s",
+				ErrNotFound,
 				path,
 			)
 		}

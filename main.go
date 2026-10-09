@@ -296,6 +296,11 @@ func (m model) fileView() tea.View {
 	s += fmt.Sprintf("Name:          %s\n", entry.Name)
 	s += "Type:          File\n"
 	s += fmt.Sprintf("Size:          %d bytes\n", entry.Size)
+
+	if !entry.Modified.IsZero() {
+		s += fmt.Sprintf("Modified:      %s\n", entry.Modified.Format("2006-01-02 15:04"))
+	}
+
 	s += fmt.Sprintf("Start cluster: %d\n", entry.StartCluster)
 	s += "\nBackspace/h: back   q: quit\n"
 

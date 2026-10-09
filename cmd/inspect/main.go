@@ -1,138 +1,131 @@
+// Command inspect prints the FAT32 geometry of an image or device and a
+// detailed listing of one directory. It never writes.
+//
+//	go run ./cmd/inspect [-path /Music] images/yp-z5a-full-20261009.img
+//	sudo go run ./cmd/inspect -path /Music /dev/rdisk4
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/piero/ypz5/fat32"
 )
 
 func main() {
-	deviceName := "/dev/rdisk4s1"
-	fmt.Println("opening device:", deviceName)
+	dir := flag.String("path", "/", "directory to list")
 
-	f, err := os.Open(deviceName)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "open:", err)
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: inspect [-path DIR] IMAGE_OR_DEVICE")
+		flag.PrintDefaults()
+	}
+
+	flag.Parse()
+
+	if flag.NArg() != 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	if err := inspect(flag.Arg(0), *dir); err != nil {
+		fmt.Fprintln(os.Stderr, "inspect:", err)
 		os.Exit(1)
+	}
+}
+
+func inspect(source, dir string) error {
+	f, err := os.Open(source)
+	if err != nil {
+		return err
 	}
 	defer f.Close()
 
-	fmt.Println("creating filesystem...")
+	offset, err := fat32.PartitionOffset(f)
+	if err != nil {
+		return err
+	}
 
-	fs := fat32.New(f)
-
-	fmt.Println("opening filesystem...")
+	// The section's size is unknown for devices; the filesystem never
+	// reads past the volume anyway.
+	fs := fat32.New(io.NewSectionReader(f, offset, 1<<62))
 
 	if err := fs.Open(); err != nil {
-		fmt.Fprintln(os.Stderr, "fs.Open:", err)
-		os.Exit(1)
+		return err
 	}
 
-	fmt.Printf("bytes/sector:     %d\n", fs.BootSector().BytesPerSector)
-	fmt.Printf("sectors/cluster:  %d\n", fs.BootSector().SectorsPerCluster)
-	fmt.Printf("total sectors:    %d\n", fs.BootSector().TotalSectors)
-	fmt.Printf("cluster count:    %d\n", fs.BootSector().ClusterCount())
-	fmt.Printf("max cluster:      %d\n", fs.BootSector().MaxCluster())
+	boot := fs.BootSector()
 
-	freeCluster, err := fs.FindFreeCluster(2)
+	fmt.Printf("source:            %s\n", source)
+	fmt.Printf("partition offset:  %d\n", offset)
+	fmt.Printf("bytes/sector:      %d\n", boot.BytesPerSector)
+	fmt.Printf("sectors/cluster:   %d\n", boot.SectorsPerCluster)
+	fmt.Printf("cluster size:      %d\n", fs.BytesPerCluster())
+	fmt.Printf("FATs:              %d\n", boot.NumberOfFATs)
+	fmt.Printf("total sectors:     %d\n", boot.TotalSectors)
+	fmt.Printf("clusters:          %d\n", boot.ClusterCount())
+
+	if free, ok := fs.FreeClusters(); ok {
+		fmt.Printf(
+			"free (FSInfo):     %d clusters, %d bytes\n",
+			free,
+			int64(free)*fs.BytesPerCluster(),
+		)
+	} else {
+		fmt.Println("free (FSInfo):     unknown")
+	}
+
+	entries, err := fs.ReadDir(dir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "find free cluster:", err)
-		os.Exit(1)
+		return err
 	}
 
-	fmt.Printf("first free cluster: %d\n", freeCluster)
-
-	fmt.Println("finding /Music...")
-
-	dir, err := fs.Find("/Music")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "fs.Find:", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf(
-		"found %q at cluster %d\n",
-		dir.Name,
-		dir.StartCluster,
-	)
-
-	fmt.Println("reading the /Music directory...")
-
-	entries, err := fs.ReadDir("/Music")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "fs.ReadDir:", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("found %d entries\n", len(entries))
+	fmt.Printf("\n%s: %d entries\n\n", dir, len(entries))
+	fmt.Printf("%-6s %-16s %-12s %10s %8s  %s\n", "ATTR", "MODIFIED", "8.3", "SIZE", "CLUSTER", "NAME")
 
 	for _, entry := range entries {
-		kind := "FILE"
-		if entry.IsDir {
-			kind = "DIR "
+		modified := "-"
+		if !entry.Modified.IsZero() {
+			modified = entry.Modified.Format("2006-01-02 15:04")
 		}
 
 		fmt.Printf(
-			"%-4s %-50s cluster=%-8d size=%-8d dirCluster=%-8d dirOffset=%d\n",
-			kind,
-			entry.Name,
-			entry.StartCluster,
+			"%-6s %-16s %-12s %10d %8d  %s\n",
+			attributes(entry.Attr),
+			modified,
+			entry.ShortName,
 			entry.Size,
-			entry.EntryCluster,
-			entry.EntryOffset,
+			entry.StartCluster,
+			entry.Name,
 		)
 	}
 
-	filePath := "/Music/Cartoni animati/Pollon.mp3"
-	fmt.Println("\nTesting", filePath)
-	data, err := fs.ReadFile(filePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "fs.ReadFile:", err)
-		os.Exit(1)
+	return nil
+}
+
+// attributes renders attribute bits as "DRHSA" flags.
+func attributes(attr uint8) string {
+	flags := []struct {
+		bit  uint8
+		char byte
+	}{
+		{fat32.AttrDirectory, 'D'},
+		{fat32.AttrReadOnly, 'R'},
+		{fat32.AttrHidden, 'H'},
+		{fat32.AttrSystem, 'S'},
+		{fat32.AttrArchive, 'A'},
 	}
 
-	fmt.Printf("read %d bytes\n", len(data))
-	fmt.Printf("first 32 bytes: %q\n", data[:min(32, len(data))])
+	s := make([]byte, len(flags))
 
-	entry, err := fs.Lookup(filePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "lookup:", err)
-		os.Exit(1)
+	for i, flag := range flags {
+		s[i] = '-'
+
+		if attr&flag.bit != 0 {
+			s[i] = flag.char
+		}
 	}
 
-	fmt.Printf(
-		"directory entry: cluster=%d offset=%d LFN entries=%d\n",
-		entry.EntryCluster,
-		entry.EntryOffset,
-		entry.LFNEntries,
-	)
-
-	chain, err := fs.ClusterChain(entry.StartCluster)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "cluster chain:", err)
-		os.Exit(1)
-	}
-
-	expectedClusters := (uint64(entry.Size) +
-		uint64(fs.BootSector().BytesPerSector)*
-			uint64(fs.BootSector().SectorsPerCluster) - 1) /
-		(uint64(fs.BootSector().BytesPerSector) *
-			uint64(fs.BootSector().SectorsPerCluster))
-
-	fmt.Printf("file size:          %d bytes\n", entry.Size)
-	fmt.Printf("cluster size:       %d bytes\n",
-		fs.BootSector().BytesPerSector*
-			uint16(fs.BootSector().SectorsPerCluster))
-	fmt.Printf("cluster chain size: %d\n", len(chain))
-	fmt.Printf("expected clusters:  %d\n", expectedClusters)
-	fmt.Printf("first cluster:      %d\n", chain[0])
-	fmt.Printf("last cluster:       %d\n", chain[len(chain)-1])
-
-	fmt.Println("\nInspecting directory entries around Pollon.mp3")
-
-	if err := fs.DebugDirectory("/Music/Cartoni animati"); err != nil {
-		fmt.Fprintln(os.Stderr, "debug directory:", err)
-		os.Exit(1)
-	}
+	return string(s)
 }

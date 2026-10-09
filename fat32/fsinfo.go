@@ -65,36 +65,21 @@ func (fs *Filesystem) loadFSInfo() error {
 		return nil
 	}
 
-	free, err := fs.countFreeClusters()
-	if err != nil {
-		return err
-	}
-
-	if free != fs.info.freeCount {
-		fs.info.freeCount = free
-		fs.info.dirty = true
-	}
-
-	return nil
+	// Loading the FAT recomputes the free count.
+	return fs.loadFAT()
 }
 
-func (fs *Filesystem) countFreeClusters() (uint32, error) {
-	maxCluster := fs.boot.MaxCluster()
-	fat := make([]byte, (int64(maxCluster)+1)*4)
-
-	if _, err := fs.reader.ReadAt(fat, fs.layout.FATOffset); err != nil {
-		return 0, fmt.Errorf("read FAT: %w", err)
-	}
-
+// countFreeClusters counts free clusters in the loaded FAT.
+func (fs *Filesystem) countFreeClusters() uint32 {
 	var free uint32
 
-	for cluster := uint32(2); cluster <= maxCluster; cluster++ {
-		if binary.LittleEndian.Uint32(fat[cluster*4:])&0x0FFFFFFF == 0 {
+	for _, value := range fs.fat.entries[2:] {
+		if value == 0 {
 			free++
 		}
 	}
 
-	return free, nil
+	return free
 }
 
 // noteFATChange keeps the FSInfo free count in step with a FAT entry

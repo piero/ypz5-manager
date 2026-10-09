@@ -25,6 +25,7 @@ func TestReadFATEntry(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: sectorSize,
+		SectorsPerFAT:  1,
 	}
 
 	fs.layout = Layout{
@@ -60,6 +61,7 @@ func TestReadFATEntryMasksReservedBits(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: sectorSize,
+		SectorsPerFAT:  1,
 	}
 
 	fs.layout = Layout{
@@ -94,6 +96,7 @@ func TestReadClusterChain(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: sectorSize,
+		SectorsPerFAT:  1,
 	}
 
 	fs.layout = Layout{
@@ -129,6 +132,7 @@ func TestReadClusterChainSingleCluster(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: sectorSize,
+		SectorsPerFAT:  1,
 	}
 
 	fs.layout = Layout{
@@ -179,6 +183,7 @@ func TestIsFreeCluster(t *testing.T) {
 	fs := New(bytes.NewReader(data))
 	fs.boot = BootSector{
 		BytesPerSector: 512,
+		SectorsPerFAT:  1,
 	}
 	fs.layout = Layout{
 		FATOffset: fatOffset,
@@ -365,6 +370,7 @@ func TestClusterChain(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: sectorSize,
+		SectorsPerFAT:  1,
 	}
 
 	fs.layout = Layout{
@@ -388,6 +394,7 @@ func TestAllocateClusterChainInvalidCount(t *testing.T) {
 
 	fs.boot = BootSector{
 		BytesPerSector: 512,
+		SectorsPerFAT:  1,
 	}
 
 	_, err := fs.allocateClusterChain(0)
@@ -464,13 +471,11 @@ func TestAllocateClusterChainLinkFailure(t *testing.T) {
 		fat32EOF,
 	)
 
-	// Fail during the first link operation.
-	//
-	// allocateCluster() writes one FAT sector for each allocated
-	// cluster, so three successful allocations consume three writes.
+	// The whole chain is written to the FAT in one sector write.
+	// Fail that write; the rollback write succeeds.
 	writer := &failingWriterAt{
 		data:      data,
-		failAfter: 3,
+		failAfter: 0,
 		failOnce:  true,
 	}
 
@@ -497,17 +502,8 @@ func TestAllocateClusterChainLinkFailure(t *testing.T) {
 		t.Fatal("allocateClusterChain unexpectedly succeeded")
 	}
 
-	// The three clusters were allocated before the link failed.
-	//
-	// Expected sequence:
-	//
-	// - allocate 3  ✓
-	// - allocate 4  ✓
-	// - allocate 5  ✓
-	// - link 3 → 4  ✗  ← injected failure
-	// - rollback 3  ✓
-	// - rollback 4  ✓
-	// - rollback 5  ✓
+	// The failed FAT write was rolled back, so none of the clusters
+	// is allocated.
 	for _, cluster := range []uint32{3, 4, 5} {
 		free, err := fs.IsFreeCluster(cluster)
 		if err != nil {
@@ -561,13 +557,14 @@ func TestAllocateClusterChainAllocationFailure(t *testing.T) {
 		FATOffset: fatOffset,
 	}
 
-	_, err := fs.allocateClusterChain(3)
+	// Only clusters 3..9 are free: asking for more must fail before
+	// anything is written.
+	_, err := fs.allocateClusterChain(8)
 	if err == nil {
 		t.Fatal("allocateClusterChain unexpectedly succeeded")
 	}
 
-	// Clusters 3 and 4 were allocated before the failure and
-	// must have been rolled back.
+	// Nothing was allocated.
 	for _, cluster := range []uint32{3, 4} {
 		free, err := fs.IsFreeCluster(cluster)
 		if err != nil {
@@ -582,7 +579,6 @@ func TestAllocateClusterChainAllocationFailure(t *testing.T) {
 		}
 	}
 
-	// Cluster 5 was never successfully allocated.
 	free, err := fs.IsFreeCluster(5)
 	if err != nil {
 		t.Fatal(err)
@@ -606,12 +602,12 @@ func TestAllocateClusterChainRollbackFailure(t *testing.T) {
 		fat32EOF,
 	)
 
-	// Two allocations succeed.
-	// The third allocation fails.
-	// Rollback then fails as well.
+	// The FAT write fails after writing half the sector, and the
+	// rollback write fails as well.
 	writer := &failingWriterAt{
-		data:      data,
-		failAfter: 2,
+		data:         data,
+		failAfter:    0,
+		partialWrite: true,
 	}
 
 	fs := NewReadWrite(
@@ -637,21 +633,33 @@ func TestAllocateClusterChainRollbackFailure(t *testing.T) {
 		t.Fatal("allocateClusterChain unexpectedly succeeded")
 	}
 
-	if !strings.Contains(err.Error(), "rollback cluster") {
+	if !strings.Contains(err.Error(), "rollback failed") {
 		t.Fatalf(
 			"error = %q, want rollback error",
 			err,
 		)
 	}
 
-	// Rollback failed, so at least one allocated cluster remains.
-	free, err := fs.IsFreeCluster(3)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// After a failed rollback the cache is reloaded, so it reports
+	// what is actually on disk.
+	for cluster := uint32(3); cluster <= 5; cluster++ {
+		got, err := fs.readFATEntry(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if free {
-		t.Fatal("cluster 3 unexpectedly free after rollback failure")
+		onDisk := binary.LittleEndian.Uint32(
+			data[fatOffset+cluster*4:],
+		) & 0x0FFFFFFF
+
+		if got != onDisk {
+			t.Fatalf(
+				"FAT[%d] = %#x, but disk has %#x",
+				cluster,
+				got,
+				onDisk,
+			)
+		}
 	}
 }
 
@@ -996,9 +1004,11 @@ func TestFreeClusterChainWriteFailure(t *testing.T) {
 		)
 	}
 
+	// The chain is freed in one sector write per FAT copy: the first
+	// FAT is written, the second fails.
 	writer := &failingWriterAt{
 		data:      data,
-		failAfter: 2,
+		failAfter: 1,
 	}
 
 	fs := NewReadWrite(bytes.NewReader(data), writer)
@@ -1135,7 +1145,7 @@ func TestAllocateClusterChainRollsBackOnLinkFailure(t *testing.T) {
 	writer := &failOnWriteCountAt{
 		data:       data,
 		failOffset: fatOffset,
-		failCount:  5,
+		failCount:  1,
 	}
 
 	fs := &Filesystem{
@@ -1161,10 +1171,9 @@ func TestAllocateClusterChainRollsBackOnLinkFailure(t *testing.T) {
 		t.Fatal("allocateClusterChain succeeded, want error")
 	}
 
-	// Writes 1-3 allocate clusters 4, 5, and 6.
-	// Write 4 links 4 -> 5.
-	// Write 5 attempts to link 5 -> 6 and is injected to fail.
-	// The allocation rollback must then free 4, 5, and 6.
+	// Write 1 allocates and links 4 -> 5 -> 6 in one FAT sector and
+	// is injected to fail. The rollback restores the sector, so 4, 5
+	// and 6 are still free.
 	for cluster := uint32(4); cluster <= 6; cluster++ {
 		value, err := fs.readFATEntry(cluster)
 		if err != nil {

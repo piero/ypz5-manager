@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 type Filesystem struct {
@@ -13,6 +14,11 @@ type Filesystem struct {
 	boot   BootSector
 	layout Layout
 	info   fsInfo
+	fat    fatCache
+
+	// clock returns the time used for directory entry timestamps;
+	// nil means time.Now. Tests replace it.
+	clock func() time.Time
 }
 
 // ErrProtected is returned when an operation would modify or remove a
@@ -74,6 +80,7 @@ func (fs *Filesystem) Open() error {
 
 	fs.boot = boot
 	fs.layout = boot.Layout()
+	fs.fat = fatCache{}
 
 	if fs.writer != nil && boot.FATMirroringDisabled() {
 		return fmt.Errorf(
@@ -141,14 +148,8 @@ func (fs *Filesystem) deleteFile(path string) error {
 	}
 
 	// Release the file's clusters.
-	for _, cluster := range chain {
-		if err := fs.writeFATEntry(cluster, 0); err != nil {
-			return fmt.Errorf(
-				"free cluster %d: %w",
-				cluster,
-				err,
-			)
-		}
+	if len(chain) > 0 {
+		return fs.freeClusters(chain)
 	}
 
 	return nil
@@ -372,6 +373,8 @@ func (fs *Filesystem) replaceFile(path string, data []byte) error {
 		uint32(len(data)),
 	)
 
+	stampModified(&shortEntry, fs.now())
+
 	if err := fs.writeDirectoryEntry(
 		record.Short,
 		shortEntry,
@@ -384,14 +387,8 @@ func (fs *Filesystem) replaceFile(path string, data []byte) error {
 		return err
 	}
 
-	for _, cluster := range oldChain {
-		if err := fs.writeFATEntry(cluster, 0); err != nil {
-			return fmt.Errorf(
-				"free old cluster %d: %w",
-				cluster,
-				err,
-			)
-		}
+	if len(oldChain) > 0 {
+		return fs.freeClusters(oldChain)
 	}
 
 	return nil
@@ -474,6 +471,10 @@ func (fs *Filesystem) mkdir(path string) error {
 	if err != nil {
 		return rollback(err)
 	}
+
+	now := fs.now()
+	stampCreated(&dotEntry, now)
+	stampCreated(&dotDotEntry, now)
 
 	copy(directoryData[0:32], dotEntry[:])
 	copy(directoryData[32:64], dotDotEntry[:])
@@ -719,6 +720,8 @@ func (fs *Filesystem) createDirectoryRecord(
 		return err
 	}
 
+	stampCreated(&record.Short, fs.now())
+
 	slotCount := len(record.LFN) + 1
 
 	slots, err := fs.findFreeDirectorySlots(
@@ -914,14 +917,8 @@ func (fs *Filesystem) removeAll(path string) error {
 			return err
 		}
 
-		for _, cluster := range chain {
-			if err := fs.writeFATEntry(cluster, 0); err != nil {
-				return fmt.Errorf(
-					"free directory cluster %d: %w",
-					cluster,
-					err,
-				)
-			}
+		if err := fs.freeClusters(chain); err != nil {
+			return err
 		}
 	}
 

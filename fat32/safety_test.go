@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 // checkConsistency verifies the whole filesystem the way fsck would:
@@ -414,4 +416,149 @@ func TestYPZ5RemoveAllChecksWholeTreeFirst(t *testing.T) {
 	}
 
 	checkConsistency(t, fs)
+}
+
+func TestFATDateTimeRoundTrip(t *testing.T) {
+	in := time.Date(2026, 10, 9, 18, 30, 15, 250_000_000, time.Local)
+
+	date, clock, tenths := encodeFATDateTime(in)
+
+	// FAT time has a 2-second resolution; the odd second and the
+	// milliseconds go into the creation tenths.
+	if got, want := decodeFATDateTime(date, clock), in.Truncate(2*time.Second); !got.Equal(want) {
+		t.Fatalf("round trip = %v, want %v", got, want)
+	}
+
+	if tenths != 125 {
+		t.Fatalf("tenths = %d, want 125", tenths)
+	}
+
+	if got := decodeFATDateTime(0, 0); !got.IsZero() {
+		t.Fatalf("zero date decoded as %v", got)
+	}
+
+	date, _, _ = encodeFATDateTime(time.Date(1970, 1, 1, 0, 0, 0, 0, time.Local))
+	if got := decodeFATDateTime(date, 0); got.Year() != 1980 || got.Month() != 1 || got.Day() != 1 {
+		t.Fatalf("pre-1980 date clamped to %v, want 1980-01-01", got)
+	}
+}
+
+func TestYPZ5NewEntriesHaveTimestamps(t *testing.T) {
+	_, fs := openYPZ5WriteImage(t)
+
+	created := time.Date(2026, 10, 9, 18, 30, 16, 0, time.Local) // even: FAT has 2 s resolution
+	fs.clock = func() time.Time { return created }
+
+	if err := fs.Mkdir("/Music/Dated"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.WriteFile("/Music/Dated/Song.mp3", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/Music/Dated", "/Music/Dated/Song.mp3"} {
+		entry, err := fs.Lookup(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !entry.Modified.Equal(created) {
+			t.Fatalf("%s modified = %v, want %v", path, entry.Modified, created)
+		}
+	}
+
+	modified := created.Add(time.Hour)
+	fs.clock = func() time.Time { return modified }
+
+	if err := fs.ReplaceFile("/Music/Dated/Song.mp3", []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+
+	record, err := fs.findDirectoryRecord("/Music/Dated/Song.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !record.Entry.Modified.Equal(modified) {
+		t.Fatalf("modified after replace = %v, want %v", record.Entry.Modified, modified)
+	}
+
+	cluster, err := fs.readCluster(record.Short.Cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short := cluster[record.Short.Offset : record.Short.Offset+32]
+
+	createdOnDisk := decodeFATDateTime(
+		binary.LittleEndian.Uint16(short[entryCreateDate:]),
+		binary.LittleEndian.Uint16(short[entryCreateTime:]),
+	)
+
+	if !createdOnDisk.Equal(created) {
+		t.Fatalf("creation time changed by replace: %v, want %v", createdOnDisk, created)
+	}
+}
+
+// TestYPZ5DamagedLFNFallsBackToShortName verifies that a corrupted long
+// filename only affects its own entry: the directory stays readable and
+// writable, and the file is listed under its 8.3 name.
+func TestYPZ5DamagedLFNFallsBackToShortName(t *testing.T) {
+	_, fs := openYPZ5WriteImage(t)
+
+	const path = "/Music/Iron Maiden/01 - Prowler.mp3"
+
+	record, err := fs.findDirectoryRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(record.LFN) == 0 {
+		t.Fatal("test file has no LFN entries")
+	}
+
+	// Corrupt the checksum of the file's first LFN entry.
+	location := record.LFN[0]
+
+	cluster, err := fs.readCluster(location.Cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var lfn [32]byte
+	copy(lfn[:], cluster[location.Offset:])
+	lfn[0x0D] ^= 0xFF
+
+	if err := fs.writeDirectoryEntry(location, lfn); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := fs.ReadDir("/Music/Iron Maiden")
+	if err != nil {
+		t.Fatalf("directory with a damaged LFN is unreadable: %v", err)
+	}
+
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+
+	joined := strings.Join(names, "\n")
+
+	if !strings.Contains(joined, record.Entry.ShortName) {
+		t.Fatalf("8.3 name %q not listed:\n%s", record.Entry.ShortName, joined)
+	}
+
+	if strings.Contains(joined, "01 - Prowler.mp3") {
+		t.Fatal("damaged long name is still listed")
+	}
+
+	if _, err := fs.ReadFile("/Music/Iron Maiden/" + record.Entry.ShortName); err != nil {
+		t.Fatalf("file unreadable under its 8.3 name: %v", err)
+	}
+
+	if err := fs.WriteFile("/Music/Iron Maiden/New.mp3", []byte("new")); err != nil {
+		t.Fatalf("directory with a damaged LFN is not writable: %v", err)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -31,6 +32,7 @@ type DirectoryEntry struct {
 	ShortName    string
 	IsDir        bool
 	Attr         uint8
+	Modified     time.Time
 	Size         uint32
 	StartCluster uint32
 
@@ -60,6 +62,24 @@ type directoryRecord struct {
 type directoryEntrySlot struct {
 	Cluster uint32
 	Offset  uint32
+}
+
+// lfnBelongsTo reports whether the LFN run is a valid sequence whose
+// checksums match the short entry that follows it.
+func lfnBelongsTo(entries []lfnEntry, shortEntry []byte) bool {
+	if validateLFNSequence(entries) != nil {
+		return false
+	}
+
+	checksum := shortNameChecksum(shortEntry)
+
+	for _, entry := range entries {
+		if entry.Checksum != checksum {
+			return false
+		}
+	}
+
+	return true
 }
 
 func validateLFNSequence(entries []lfnEntry) error {
@@ -140,7 +160,16 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 			if entry[0x0B] == 0x0F {
 				name, err := parseLFNEntry(entry)
 				if err != nil {
-					return nil, err
+					// A damaged LFN entry invalidates its run; the
+					// file is still listed under its 8.3 name.
+					lfn = nil
+					continue
+				}
+
+				// The last-entry flag marks the first entry on disk of
+				// a new LFN run: anything collected so far is orphaned.
+				if name.IsLast {
+					lfn = nil
 				}
 
 				name.EntryCluster = cluster
@@ -162,26 +191,14 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 				return nil, err
 			}
 
+			// Like other FAT implementations, an LFN run that is
+			// damaged or belongs to another entry is ignored and the
+			// 8.3 name is used, rather than failing the directory.
+			if len(lfn) > 0 && !lfnBelongsTo(lfn, entry) {
+				lfn = nil
+			}
+
 			if len(lfn) > 0 {
-				if err := validateLFNSequence(lfn); err != nil {
-					return nil, fmt.Errorf(
-						"invalid LFN sequence for %q: %w",
-						dirEntry.ShortName,
-						err,
-					)
-				}
-
-				checksum := shortNameChecksum(entry)
-
-				for _, lfnEntry := range lfn {
-					if lfnEntry.Checksum != checksum {
-						return nil, fmt.Errorf(
-							"LFN checksum mismatch for %q",
-							dirEntry.ShortName,
-						)
-					}
-				}
-
 				dirEntry.Name = combineLFN(lfn)
 				dirEntry.LFNEntries = uint8(len(lfn))
 			} else {
@@ -472,9 +489,13 @@ func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 			uint32(startClusterLow)
 
 	return DirectoryEntry{
-		ShortName:    parseShortName(data),
-		IsDir:        attr&AttrDirectory != 0,
-		Attr:         attr,
+		ShortName: parseShortName(data),
+		IsDir:     attr&AttrDirectory != 0,
+		Attr:      attr,
+		Modified: decodeFATDateTime(
+			binary.LittleEndian.Uint16(data[entryWriteDate:]),
+			binary.LittleEndian.Uint16(data[entryWriteTime:]),
+		),
 		Size:         binary.LittleEndian.Uint32(data[0x1C:0x20]),
 		StartCluster: startCluster,
 	}, nil
@@ -823,52 +844,6 @@ func (fs *Filesystem) Find(path string) (DirectoryEntry, error) {
 	}
 
 	return entry, nil
-}
-
-func (fs *Filesystem) DebugDirectory(path string) error {
-	dir, err := fs.Find(path)
-	if err != nil {
-		return err
-	}
-
-	clusters, err := fs.readClusterChain(dir.StartCluster)
-	if err != nil {
-		return err
-	}
-
-	for _, cluster := range clusters {
-		data, err := fs.readCluster(cluster)
-		if err != nil {
-			return err
-		}
-
-		for offset := 0; offset < len(data); offset += 32 {
-			entry := data[offset : offset+32]
-
-			if entry[0] == 0x00 {
-				return nil
-			}
-
-			if entry[0] == 0xE5 {
-				continue
-			}
-
-			// Only print entries around Pollon's known location for now.
-			if cluster == 169063 &&
-				offset >= 2200 &&
-				offset <= 2400 {
-				fmt.Printf(
-					"cluster=%d offset=%d first=%02X attr=%02X\n",
-					cluster,
-					offset,
-					entry[0],
-					entry[0x0B],
-				)
-			}
-		}
-	}
-
-	return nil
 }
 
 func shortNameChecksum(data []byte) byte {
@@ -1276,8 +1251,9 @@ func (fs *Filesystem) findDirectoryCluster(path string) (uint32, error) {
 
 		if found == nil {
 			return 0, fmt.Errorf(
-				"directory %q not found",
+				"directory %q not found: %w",
 				component,
+				ErrNotFound,
 			)
 		}
 

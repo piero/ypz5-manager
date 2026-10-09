@@ -129,3 +129,15 @@ YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test ./fat32 -run YPZ5 -v
 # ignore cached results, e.g. after replacing the image
 YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test -count=1 ./...
 ```
+
+
+## Inspecting an image or device
+
+`cmd/inspect` prints the filesystem geometry, the free space recorded in
+FSInfo and a detailed listing of one directory (attributes, modification
+date, 8.3 name, size, first cluster). It only reads.
+
+```sh
+go run ./cmd/inspect -path /Music images/yp-z5a-full-20261009.img
+sudo go run ./cmd/inspect -path /Music /dev/rdisk4    # device, unmounted
+```

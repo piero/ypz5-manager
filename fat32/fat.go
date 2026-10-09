@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 const (
@@ -11,28 +12,106 @@ const (
 	fat32EOF        = 0x0FFFFFF8
 )
 
-func (fs *Filesystem) readFATEntry(cluster uint32) (uint32, error) {
-	offset := fs.layout.FATOffset + int64(cluster)*4
+// fatCache is an in-memory copy of the first FAT. It is loaded on first
+// use and updated after every successful FAT write, so lookups and free
+// cluster searches never touch the disk. Writes still go to the disk
+// immediately (to every FAT copy).
+type fatCache struct {
+	loaded bool
+
+	// entries holds the 28-bit value of each FAT entry, indexed by
+	// cluster number, for clusters 0..MaxCluster.
+	entries []uint32
+
+	// lowestFree is a lower bound for the first free cluster: no
+	// cluster below it is free.
+	lowestFree uint32
+}
+
+// loadFAT reads the first FAT into memory if it is not loaded yet.
+func (fs *Filesystem) loadFAT() error {
+	if fs.fat.loaded {
+		return nil
+	}
 
 	sectorSize := int64(fs.boot.BytesPerSector)
-	sectorOffset := (offset / sectorSize) * sectorSize
-	entryOffset := offset - sectorOffset
+	if sectorSize == 0 {
+		return fmt.Errorf("load FAT: invalid bytes per sector")
+	}
 
-	buf := make([]byte, sectorSize)
+	// The cache covers every cluster that both exists on the volume and
+	// has an entry in the FAT; either limit may be unknown in a partial
+	// geometry.
+	count := int64(-1)
 
-	if _, err := fs.reader.ReadAt(buf, sectorOffset); err != nil {
+	if fs.boot.SectorsPerCluster != 0 && fs.boot.TotalSectors != 0 {
+		count = int64(fs.boot.MaxCluster()) + 1
+	}
+
+	if fs.boot.SectorsPerFAT != 0 {
+		fatEntries := int64(fs.boot.SectorsPerFAT) * sectorSize / 4
+
+		if count < 0 || fatEntries < count {
+			count = fatEntries
+		}
+	}
+
+	if count < 0 {
+		return fmt.Errorf("load FAT: unknown FAT size")
+	}
+
+	size := (count*4 + sectorSize - 1) / sectorSize * sectorSize
+
+	buf := make([]byte, size)
+
+	if _, err := fs.reader.ReadAt(buf, fs.layout.FATOffset); err != nil {
+		return fmt.Errorf("read FAT: %w", err)
+	}
+
+	entries := make([]uint32, count)
+
+	for i := range entries {
+		entries[i] = binary.LittleEndian.Uint32(buf[i*4:]) & 0x0FFFFFFF
+	}
+
+	fs.fat = fatCache{
+		loaded:     true,
+		entries:    entries,
+		lowestFree: 2,
+	}
+
+	// Keep FSInfo exact on a writable filesystem, also when the cache
+	// is reloaded after a failed write.
+	if fs.info.present && fs.writer != nil {
+		free := fs.countFreeClusters()
+
+		if free != fs.info.freeCount {
+			fs.info.freeCount = free
+			fs.info.dirty = true
+		}
+	}
+
+	return nil
+}
+
+// maxFATCluster returns the highest cluster number in the loaded FAT.
+func (fs *Filesystem) maxFATCluster() uint32 {
+	return uint32(len(fs.fat.entries) - 1)
+}
+
+func (fs *Filesystem) readFATEntry(cluster uint32) (uint32, error) {
+	if err := fs.loadFAT(); err != nil {
+		return 0, err
+	}
+
+	if cluster > fs.maxFATCluster() {
 		return 0, fmt.Errorf(
-			"read FAT sector for cluster %d: %w",
+			"cluster %d is beyond the end of the volume",
 			cluster,
-			err,
 		)
 	}
 
-	value := binary.LittleEndian.Uint32(
-		buf[entryOffset : entryOffset+4],
-	)
-
-	return value & 0x0FFFFFFF, nil
+	return fs.fat.entries[cluster], nil
 }
 
 func (fs *Filesystem) readClusterChain(start uint32) ([]uint32, error) {
@@ -102,6 +181,13 @@ func (fs *Filesystem) readClusterChain(start uint32) ([]uint32, error) {
 				cluster,
 			)
 
+		case next > fs.maxFATCluster():
+			return nil, fmt.Errorf(
+				"cluster %d after cluster %d is beyond the end of the volume",
+				next,
+				cluster,
+			)
+
 		default:
 			cluster = next
 		}
@@ -124,53 +210,76 @@ func (fs *Filesystem) IsFreeCluster(cluster uint32) (bool, error) {
 }
 
 func (fs *Filesystem) FindFreeCluster(start uint32) (uint32, error) {
-	if start < 2 {
-		start = 2
-	}
-
-	for cluster := start; cluster <= fs.boot.MaxCluster(); cluster++ {
-		free, err := fs.IsFreeCluster(cluster)
-		if err != nil {
-			return 0, err
-		}
-
-		if free {
-			return cluster, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no free clusters")
-}
-
-func (fs *Filesystem) allocateCluster() (uint32, error) {
-	if err := fs.writable(); err != nil {
-		return 0, err
-	}
-
-	cluster, err := fs.FindFreeCluster(2)
+	clusters, err := fs.findFreeClusters(start, 1)
 	if err != nil {
 		return 0, err
 	}
 
-	if err := fs.writeFATEntry(cluster, fat32EOF); err != nil {
-		return 0, fmt.Errorf(
-			"allocate cluster %d: %w",
-			cluster,
-			err,
-		)
-	}
-
-	return cluster, nil
+	return clusters[0], nil
 }
 
-// Intended behavior:
-//
-// - count <= 0 → error
-// - allocate count clusters
-// - link each cluster to the next
-// - terminate the last cluster with EOF
-// - on failure, free any clusters allocated by this operation
-// - return the chain only on success
+// findFreeClusters returns the count lowest free clusters at or above
+// start, without allocating them.
+func (fs *Filesystem) findFreeClusters(start uint32, count int) ([]uint32, error) {
+	if err := fs.loadFAT(); err != nil {
+		return nil, err
+	}
+
+	if start < fs.fat.lowestFree {
+		start = fs.fat.lowestFree
+	}
+
+	if start < 2 {
+		start = 2
+	}
+
+	clusters := make([]uint32, 0, count)
+	maxCluster := fs.maxFATCluster()
+
+	for cluster := start; cluster <= maxCluster; cluster++ {
+		if fs.fat.entries[cluster] != 0 {
+			continue
+		}
+
+		if len(clusters) == 0 && start == fs.fat.lowestFree {
+			fs.fat.lowestFree = cluster
+		}
+
+		clusters = append(clusters, cluster)
+
+		if len(clusters) == count {
+			return clusters, nil
+		}
+	}
+
+	if len(clusters) == 0 && start <= fs.fat.lowestFree {
+		fs.fat.lowestFree = maxCluster + 1
+	}
+
+	if count == 1 {
+		return nil, fmt.Errorf("no free clusters")
+	}
+
+	return nil, fmt.Errorf(
+		"not enough free clusters: need %d, found %d",
+		count,
+		len(clusters),
+	)
+}
+
+func (fs *Filesystem) allocateCluster() (uint32, error) {
+	chain, err := fs.allocateClusterChain(1)
+	if err != nil {
+		return 0, err
+	}
+
+	return chain[0], nil
+}
+
+// allocateClusterChain allocates count free clusters, linked in order
+// and terminated with EOF. The FAT is written in one batch: either the
+// whole chain is allocated, or (after a failed write) every FAT sector
+// is restored and nothing is allocated.
 func (fs *Filesystem) allocateClusterChain(count int) ([]uint32, error) {
 	if err := fs.writable(); err != nil {
 		return nil, err
@@ -180,62 +289,27 @@ func (fs *Filesystem) allocateClusterChain(count int) ([]uint32, error) {
 		return nil, fmt.Errorf("invalid cluster count: %d", count)
 	}
 
-	chain := make([]uint32, 0, count)
-
-	rollback := func() error {
-		var rollbackErr error
-
-		for _, allocated := range chain {
-			if err := fs.writeFATEntry(allocated, 0); err != nil {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf(
-					"rollback cluster %d: %w",
-					allocated,
-					err,
-				))
-			}
-		}
-
-		return rollbackErr
+	chain, err := fs.findFreeClusters(2, count)
+	if err != nil {
+		return nil, err
 	}
 
-	for i := 0; i < count; i++ {
-		cluster, err := fs.allocateCluster()
+	updates := make(map[uint32]uint32, count)
 
-		// allocation failure: rollback
-		if err != nil {
-			rollbackErr := rollback()
-
-			return nil, errors.Join(
-				fmt.Errorf(
-					"allocate cluster %d of %d: %w",
-					i+1,
-					count,
-					err,
-				),
-				rollbackErr,
-			)
+	for i, cluster := range chain {
+		if i < len(chain)-1 {
+			updates[cluster] = chain[i+1]
+		} else {
+			updates[cluster] = fat32EOF
 		}
-
-		chain = append(chain, cluster)
 	}
 
-	// Link the allocated clusters together.
-	for i := 0; i < len(chain)-1; i++ {
-
-		// link error: rollback
-		if err := fs.writeFATEntry(chain[i], chain[i+1]); err != nil {
-			rollbackErr := rollback()
-
-			return nil, errors.Join(
-				fmt.Errorf(
-					"link cluster %d to %d: %w",
-					chain[i],
-					chain[i+1],
-					err,
-				),
-				rollbackErr,
-			)
-		}
+	if err := fs.writeFATEntries(updates); err != nil {
+		return nil, fmt.Errorf(
+			"allocate %d clusters: %w",
+			count,
+			err,
+		)
 	}
 
 	return chain, nil
@@ -249,17 +323,46 @@ func (fs *Filesystem) writeFATEntry(
 	cluster uint32,
 	value uint32,
 ) error {
+	return fs.writeFATEntries(map[uint32]uint32{cluster: value})
+}
+
+// writeFATEntries sets several FAT entries, writing each affected FAT
+// sector once per FAT copy. If a write fails, the sectors already
+// written are restored, and the cache is left unchanged.
+func (fs *Filesystem) writeFATEntries(updates map[uint32]uint32) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
 
-	if cluster < 2 || cluster > fs.boot.MaxCluster() {
-		return fmt.Errorf("invalid FAT cluster: %d", cluster)
+	if len(updates) == 0 {
+		return nil
 	}
 
-	value &= 0x0FFFFFFF
+	if err := fs.loadFAT(); err != nil {
+		return err
+	}
 
 	sectorSize := int64(fs.boot.BytesPerSector)
+
+	// Group the updates by FAT sector, in disk order.
+	bySector := make(map[int64][]uint32)
+
+	for cluster := range updates {
+		if cluster < 2 || cluster > fs.maxFATCluster() {
+			return fmt.Errorf("invalid FAT cluster: %d", cluster)
+		}
+
+		sector := int64(cluster) * 4 / sectorSize
+		bySector[sector] = append(bySector[sector], cluster)
+	}
+
+	sectors := make([]int64, 0, len(bySector))
+
+	for sector := range bySector {
+		sectors = append(sectors, sector)
+	}
+
+	sort.Slice(sectors, func(i, j int) bool { return sectors[i] < sectors[j] })
 
 	type fatSector struct {
 		offset int64
@@ -267,129 +370,132 @@ func (fs *Filesystem) writeFATEntry(
 		new    []byte
 	}
 
-	sectors := make([]fatSector, 0, fs.boot.NumberOfFATs)
+	pending := make([]fatSector, 0, len(sectors)*int(fs.boot.NumberOfFATs))
+	previous := make(map[uint32]uint32, len(updates))
 
-	var previous uint32
-
-	// Prepare all FAT sectors before writing anything.
+	// Prepare every FAT sector before writing anything.
 	for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
-		offset := fs.layout.FATOffset +
-			int64(fat)*int64(fs.boot.SectorsPerFAT)*sectorSize +
-			int64(cluster)*4
+		fatOffset := fs.layout.FATOffset +
+			int64(fat)*int64(fs.boot.SectorsPerFAT)*sectorSize
 
-		sectorOffset := (offset / sectorSize) * sectorSize
-		entryOffset := offset - sectorOffset
+		for _, sector := range sectors {
+			offset := fatOffset + sector*sectorSize
+			buf := make([]byte, sectorSize)
 
-		buf := make([]byte, sectorSize)
-
-		if _, err := fs.reader.ReadAt(buf, sectorOffset); err != nil {
-			return fmt.Errorf(
-				"read FAT sector for cluster %d: %w",
-				cluster,
-				err,
-			)
-		}
-
-		old := append([]byte(nil), buf...)
-
-		oldValue := binary.LittleEndian.Uint32(
-			buf[entryOffset : entryOffset+4],
-		)
-
-		if fat == 0 {
-			previous = oldValue & 0x0FFFFFFF
-		}
-
-		newValue := (oldValue & 0xF0000000) | value
-
-		binary.LittleEndian.PutUint32(
-			buf[entryOffset:entryOffset+4],
-			newValue,
-		)
-
-		sectors = append(sectors, fatSector{
-			offset: sectorOffset,
-			old:    old,
-			new:    buf,
-		})
-	}
-
-	// Write each FAT copy. If a later write fails, restore the
-	// copies that were successfully written.
-	for i, sector := range sectors {
-		n, err := fs.writer.WriteAt(
-			sector.new,
-			sector.offset,
-		)
-
-		if err != nil || n != len(sector.new) {
-			var rollbackErr error
-
-			for j := i - 1; j >= 0; j-- {
-				previous := sectors[j]
-
-				rn, rerr := fs.writer.WriteAt(
-					previous.old,
-					previous.offset,
-				)
-
-				if rerr != nil {
-					rollbackErr = fmt.Errorf(
-						"rollback FAT sector at offset %d: %w",
-						previous.offset,
-						rerr,
-					)
-					break
-				}
-
-				if rn != len(previous.old) {
-					rollbackErr = fmt.Errorf(
-						"rollback FAT sector at offset %d: short write: wrote %d of %d bytes",
-						previous.offset,
-						rn,
-						len(previous.old),
-					)
-					break
-				}
-			}
-
-			if err != nil {
-				if rollbackErr != nil {
-					return fmt.Errorf(
-						"write FAT sector for cluster %d: %w; rollback failed: %v",
-						cluster,
-						err,
-						rollbackErr,
-					)
-				}
-
+			if _, err := fs.reader.ReadAt(buf, offset); err != nil {
 				return fmt.Errorf(
-					"write FAT sector for cluster %d: %w",
-					cluster,
+					"read FAT sector at offset %d: %w",
+					offset,
 					err,
 				)
 			}
 
-			if rollbackErr != nil {
-				return fmt.Errorf(
-					"short write of FAT sector for cluster %d: wrote %d of %d bytes; rollback failed: %v",
-					cluster,
-					n,
-					len(sector.new),
-					rollbackErr,
+			old := append([]byte(nil), buf...)
+
+			for _, cluster := range bySector[sector] {
+				entryOffset := int64(cluster)*4 - sector*sectorSize
+				entry := buf[entryOffset : entryOffset+4]
+
+				oldValue := binary.LittleEndian.Uint32(entry)
+
+				if fat == 0 {
+					previous[cluster] = oldValue & 0x0FFFFFFF
+				}
+
+				binary.LittleEndian.PutUint32(
+					entry,
+					(oldValue&0xF0000000)|(updates[cluster]&0x0FFFFFFF),
 				)
 			}
 
-			return fmt.Errorf(
-				"short write of FAT sector for cluster %d: wrote %d of %d bytes",
-				cluster,
+			pending = append(pending, fatSector{
+				offset: offset,
+				old:    old,
+				new:    buf,
+			})
+		}
+	}
+
+	for i, sector := range pending {
+		n, err := fs.writer.WriteAt(sector.new, sector.offset)
+		if err == nil && n != len(sector.new) {
+			err = fmt.Errorf(
+				"short write: wrote %d of %d bytes",
 				n,
 				len(sector.new),
 			)
 		}
+
+		if err == nil {
+			continue
+		}
+
+		err = fmt.Errorf(
+			"write FAT sector at offset %d: %w",
+			sector.offset,
+			err,
+		)
+
+		// Restore this sector too: a failed write may be partial.
+		var rollbackErr error
+
+		for j := i; j >= 0; j-- {
+			restore := pending[j]
+
+			rn, rerr := fs.writer.WriteAt(restore.old, restore.offset)
+			if rerr == nil && rn != len(restore.old) {
+				rerr = fmt.Errorf(
+					"short write: wrote %d of %d bytes",
+					rn,
+					len(restore.old),
+				)
+			}
+
+			if rerr != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf(
+					"rollback FAT sector at offset %d: %w",
+					restore.offset,
+					rerr,
+				))
+			}
+		}
+
+		if rollbackErr != nil {
+			// The disk may no longer match the cache: reload it (and
+			// recount free clusters) on next use.
+			fs.fat = fatCache{}
+
+			return fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+		}
+
+		return err
 	}
 
-	fs.noteFATChange(cluster, previous, value)
+	for cluster, value := range updates {
+		value &= 0x0FFFFFFF
+		fs.fat.entries[cluster] = value
+
+		if value == 0 && cluster < fs.fat.lowestFree {
+			fs.fat.lowestFree = cluster
+		}
+
+		fs.noteFATChange(cluster, previous[cluster], value)
+	}
+
+	return nil
+}
+
+// freeClusters marks clusters as free in one batch.
+func (fs *Filesystem) freeClusters(clusters []uint32) error {
+	updates := make(map[uint32]uint32, len(clusters))
+
+	for _, cluster := range clusters {
+		updates[cluster] = 0
+	}
+
+	if err := fs.writeFATEntries(updates); err != nil {
+		return fmt.Errorf("free %d clusters: %w", len(clusters), err)
+	}
 
 	return nil
 }
@@ -404,15 +510,5 @@ func (fs *Filesystem) freeClusterChain(start uint32) error {
 		return err
 	}
 
-	for _, cluster := range chain {
-		if err := fs.writeFATEntry(cluster, 0); err != nil {
-			return fmt.Errorf(
-				"free cluster %d: %w",
-				cluster,
-				err,
-			)
-		}
-	}
-
-	return nil
+	return fs.freeClusters(chain)
 }

@@ -44,6 +44,7 @@ func TestReadFile(t *testing.T) {
 		reader: bytes.NewReader(data),
 		boot: BootSector{
 			BytesPerSector: sectorSize,
+			SectorsPerFAT:  1,
 		},
 		layout: Layout{
 			FATOffset:       fatOffset,
@@ -141,8 +142,10 @@ func TestWriteFileDataWriteFailure(t *testing.T) {
 		clusterSize = 8
 	)
 
-	data := make([]byte, dataOffset+clusterSize*2)
+	data := make([]byte, dataOffset+clusterSize*3)
 
+	// Clusters 2 and 4 are not consecutive, so they are written
+	// separately; the second write fails.
 	writer := &failingWriterAt{
 		data:      data,
 		failAfter: 1,
@@ -166,7 +169,7 @@ func TestWriteFileDataWriteFailure(t *testing.T) {
 
 	fileData := []byte("hello, world!")
 
-	err := fs.writeFileData([]uint32{2, 3}, fileData)
+	err := fs.writeFileData([]uint32{2, 4}, fileData)
 	if err == nil {
 		t.Fatal("writeFileData unexpectedly succeeded")
 	}
@@ -186,12 +189,12 @@ func TestWriteFileDataWriteFailure(t *testing.T) {
 	}
 
 	// The second cluster must remain untouched.
-	gotCluster3 := data[dataOffset+clusterSize : dataOffset+2*clusterSize]
+	gotCluster4 := data[dataOffset+2*clusterSize : dataOffset+3*clusterSize]
 
-	if !bytes.Equal(gotCluster3, make([]byte, clusterSize)) {
+	if !bytes.Equal(gotCluster4, make([]byte, clusterSize)) {
 		t.Fatalf(
-			"cluster 3 = %v, want all zeroes",
-			gotCluster3,
+			"cluster 4 = %v, want all zeroes",
+			gotCluster4,
 		)
 	}
 }

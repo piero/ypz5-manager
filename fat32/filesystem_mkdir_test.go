@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+// testTime is a fixed clock for tests that compare encoded entries.
+var testTime = time.Date(2026, 10, 9, 18, 30, 15, 250_000_000, time.Local)
 
 func TestMkdirRoundTrip(t *testing.T) {
 	const (
@@ -57,6 +61,8 @@ func TestMkdirRoundTrip(t *testing.T) {
 		buffer,
 	)
 
+	fs.clock = func() time.Time { return testTime }
+
 	fs.boot = boot
 	fs.layout = layout
 
@@ -102,6 +108,8 @@ func TestMkdirRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stampCreated(&dotEntry, testTime)
+
 	if !bytes.Equal(
 		directoryData[0:32],
 		dotEntry[:],
@@ -118,6 +126,8 @@ func TestMkdirRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	stampCreated(&dotDotEntry, testTime)
 
 	if !bytes.Equal(
 		directoryData[32:64],
@@ -467,6 +477,8 @@ func TestMkdirInSubdirectory(t *testing.T) {
 		buffer,
 	)
 
+	fs.clock = func() time.Time { return testTime }
+
 	fs.boot = boot
 	fs.layout = layout
 
@@ -528,6 +540,8 @@ func TestMkdirInSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stampCreated(&dotEntry, testTime)
+
 	if !bytes.Equal(
 		childData[0:32],
 		dotEntry[:],
@@ -544,6 +558,8 @@ func TestMkdirInSubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	stampCreated(&dotDotEntry, testTime)
 
 	if !bytes.Equal(
 		childData[32:64],

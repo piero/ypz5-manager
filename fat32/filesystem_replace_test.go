@@ -2539,7 +2539,8 @@ func TestReplaceFileCommitsNewFileWhenOldChainFreeFails(t *testing.T) {
 	buffer := &failOnWriteCountAt{
 		data:       data,
 		failOffset: fatOffset,
-		failCount:  3,
+		// Write 1 allocates the new chain, write 2 frees the old one.
+		failCount: 2,
 	}
 
 	fs := NewReadWrite(

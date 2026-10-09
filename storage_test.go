@@ -21,10 +21,10 @@ func TestOpenStorageReadsAndWritesAtTheDetectedPartitionOffset(t *testing.T) {
 	mbr[0x1FF] = 0xAA
 
 	entryOffset := 0x1BE
-	mbr[entryOffset+4] = fat32PartitionTypeLBA
+	mbr[entryOffset+4] = 0x0C // FAT32 (LBA)
 	binary.LittleEndian.PutUint32(
 		mbr[entryOffset+8:entryOffset+12],
-		uint32(partitionOffset/sectorSize),
+		uint32(partitionOffset/512),
 	)
 
 	if _, err := file.Write(mbr); err != nil {

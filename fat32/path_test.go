@@ -53,6 +53,7 @@ func TestFindEntryFile(t *testing.T) {
 		reader: bytes.NewReader(data),
 		boot: BootSector{
 			BytesPerSector: sectorSize,
+			SectorsPerFAT:  1,
 			RootCluster:    2,
 		},
 		layout: Layout{

@@ -95,31 +95,46 @@ func (fs *Filesystem) writeFileData(
 		)
 	}
 
-	for i, cluster := range chain {
-		start := i * clusterSize
-		end := start + clusterSize
+	// Consecutive clusters are written with a single write, which is
+	// much faster on USB devices than one write per cluster.
+	maxRun := maxWriteSize / clusterSize
+	if maxRun < 1 {
+		maxRun = 1
+	}
 
-		clusterData := make([]byte, clusterSize)
+	for i := 0; i < len(chain); {
+		run := 1
 
-		if start < len(data) {
-			if end > len(data) {
-				end = len(data)
-			}
-
-			copy(clusterData, data[start:end])
+		for i+run < len(chain) &&
+			run < maxRun &&
+			chain[i+run] == chain[i+run-1]+1 {
+			run++
 		}
 
-		if err := fs.writeCluster(cluster, clusterData); err != nil {
+		start := i * clusterSize
+		runData := make([]byte, run*clusterSize)
+
+		if start < len(data) {
+			copy(runData, data[start:])
+		}
+
+		if err := fs.writeClusters(chain[i], runData); err != nil {
 			return fmt.Errorf(
-				"write file data to cluster %d: %w",
-				cluster,
+				"write file data to clusters %d-%d: %w",
+				chain[i],
+				chain[i+run-1],
 				err,
 			)
 		}
+
+		i += run
 	}
 
 	return nil
 }
+
+// maxWriteSize caps the size of a single data write.
+const maxWriteSize = 1 << 20
 
 func (fs *Filesystem) clustersForSize(size int) int {
 	if size <= 0 {

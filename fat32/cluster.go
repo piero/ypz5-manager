@@ -7,6 +7,14 @@ func (fs *Filesystem) readCluster(cluster uint32) ([]byte, error) {
 		return nil, fmt.Errorf("invalid cluster: %d", cluster)
 	}
 
+	if fs.boot.SectorsPerCluster != 0 && fs.boot.TotalSectors != 0 &&
+		cluster > fs.boot.MaxCluster() {
+		return nil, fmt.Errorf(
+			"cluster %d is beyond the end of the volume",
+			cluster,
+		)
+	}
+
 	// FAT32's data region starts at cluster 2:
 	//   cluster 2 → first data cluster
 	//   cluster 3 → second data cluster
@@ -35,20 +43,38 @@ func (fs *Filesystem) ReadRootCluster() ([]byte, error) {
 }
 
 func (fs *Filesystem) writeCluster(cluster uint32, data []byte) error {
-	if err := fs.writable(); err != nil {
-		return err
-	}
-
-	if cluster < 2 || cluster > fs.boot.MaxCluster() {
-		return fmt.Errorf("invalid cluster: %d", cluster)
-	}
-
 	if int64(len(data)) != fs.layout.BytesPerCluster {
 		return fmt.Errorf(
 			"invalid cluster data size: got %d, want %d",
 			len(data),
 			fs.layout.BytesPerCluster,
 		)
+	}
+
+	return fs.writeClusters(cluster, data)
+}
+
+// writeClusters writes data to consecutive clusters starting at cluster.
+// len(data) must be a whole number of clusters.
+func (fs *Filesystem) writeClusters(cluster uint32, data []byte) error {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	size := fs.layout.BytesPerCluster
+
+	if len(data) == 0 || int64(len(data))%size != 0 {
+		return fmt.Errorf(
+			"invalid cluster data size: %d bytes is not a multiple of %d",
+			len(data),
+			size,
+		)
+	}
+
+	last := uint64(cluster) + uint64(int64(len(data))/size) - 1
+
+	if cluster < 2 || last > uint64(fs.boot.MaxCluster()) {
+		return fmt.Errorf("invalid cluster: %d", cluster)
 	}
 
 	offset := fs.layout.DataOffset +

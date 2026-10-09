@@ -1013,12 +1013,12 @@ func TestWriteFileReportsPartialChainRollbackFailure(t *testing.T) {
 	)
 
 	// We need a writer that:
-	//   1. allows the two FAT writes used to allocate clusters 3 and 4;
+	//   1. allows the FAT write that allocates clusters 3 and 4;
 	//   2. fails the directory write;
-	//   3. allows the first rollback FAT write;
-	//   4. fails the second rollback FAT write.
+	//   3. fails the FAT write that frees the chain again;
+	//   4. allows restoring the FAT sector after that failure.
 	buffer.failDirectoryWrite = true
-	buffer.failFATWriteCount = 5
+	buffer.failFATWriteCount = 2
 
 	fs := &Filesystem{
 		reader: buffer,
@@ -1060,18 +1060,19 @@ func TestWriteFileReportsPartialChainRollbackFailure(t *testing.T) {
 		t.Fatalf("missing rollback error: %v", err)
 	}
 
-	// The first cluster should have been freed before the second
-	// rollback write failed.
+	// The rollback could not free the chain, so it stays allocated
+	// (leaked) rather than half-freed.
 	cluster1FAT, err := fs.readFATEntry(dataCluster1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if cluster1FAT != 0 {
+	if cluster1FAT != dataCluster2 {
 		t.Fatalf(
-			"cluster %d FAT entry = %#x, want 0",
+			"cluster %d FAT entry = %#x, want %d",
 			dataCluster1,
 			cluster1FAT,
+			dataCluster2,
 		)
 	}
 }
@@ -4178,12 +4179,13 @@ func TestWriteNewFileDataRollsBackEntireChainOnDataWriteFailure(t *testing.T) {
 		fat32EOF,
 	)
 
-	// Fail when writing the second data cluster.
-	secondDataCluster := uint32(4)
+	// The chain 3 -> 4 -> 5 is consecutive, so its data is written
+	// with one write starting at cluster 3. Fail that write.
+	firstDataCluster := uint32(3)
 
 	failOffset := int64(
 		dataOffset +
-			int(secondDataCluster-2)*bytesPerCluster,
+			int(firstDataCluster-2)*bytesPerCluster,
 	)
 
 	writer := &failOnWriteCountAt{

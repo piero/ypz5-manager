@@ -133,9 +133,13 @@ func TestDeleteWriteFailure(t *testing.T) {
 	data[directoryOffset+64] = 0x00
 
 	reader := bytes.NewReader(data)
+	// Writes 1-2 delete the LFN and short entries, write 3 frees the
+	// chain in the first FAT, and write 4 (second FAT) fails. The
+	// rollback of the first FAT succeeds.
 	writer := &failingWriterAt{
 		data:      data,
-		failAfter: 4,
+		failAfter: 3,
+		failOnce:  true,
 	}
 
 	fs := NewReadWrite(reader, writer)
@@ -156,24 +160,26 @@ func TestDeleteWriteFailure(t *testing.T) {
 		t.Fatalf("short entry was not marked deleted: got %#x", got)
 	}
 
-	// Cluster 3 was freed before the failure.
-	free, err := fs.IsFreeCluster(3)
-	if err != nil {
-		t.Fatal(err)
+	// Freeing is all-or-nothing: the clusters stay allocated (leaked,
+	// never cross-linked) in both FAT copies.
+	for _, cluster := range []uint32{3, 4} {
+		free, err := fs.IsFreeCluster(cluster)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if free {
+			t.Fatalf("cluster %d was freed despite the failure", cluster)
+		}
 	}
 
-	if !free {
-		t.Fatal("cluster 3 was not freed")
-	}
+	for fat := int64(0); fat < int64(boot.NumberOfFATs); fat++ {
+		offset := layout.FATOffset +
+			fat*int64(boot.SectorsPerFAT)*int64(boot.BytesPerSector)
 
-	// Cluster 4 was not reached.
-	free, err = fs.IsFreeCluster(4)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if free {
-		t.Fatal("cluster 4 was unexpectedly freed")
+		if binary.LittleEndian.Uint32(data[offset+3*4:]) == 0 {
+			t.Fatalf("FAT %d: cluster 3 is free on disk", fat)
+		}
 	}
 
 	t.Log("Delete failed as expected")
@@ -1302,7 +1308,7 @@ func TestDeleteFATFailureRollsBackCurrentFATEntry(t *testing.T) {
 	buffer := &failDirectoryAndFATRollbackBuffer{
 		data:              data,
 		directoryOffset:   dataOffset,
-		failFATWriteCount: 2,
+		failFATWriteCount: 1,
 	}
 
 	fs := &Filesystem{
@@ -1346,22 +1352,22 @@ func TestDeleteFATFailureRollsBackCurrentFATEntry(t *testing.T) {
 		)
 	}
 
-	// The first cluster was freed successfully.
-	free, err := fs.IsFreeCluster(firstCluster)
+	// The chain is freed in one FAT write, which failed and was
+	// rolled back: both clusters keep their original values.
+	value, err := fs.readFATEntry(firstCluster)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !free {
+	if value != secondCluster {
 		t.Fatalf(
-			"first file cluster %d was not freed",
-			firstCluster,
+			"first file cluster FAT value = %#x, want %d",
+			value,
+			secondCluster,
 		)
 	}
 
-	// The second FAT update failed, so its original EOF value must
-	// still be present.
-	free, err = fs.IsFreeCluster(secondCluster)
+	free, err := fs.IsFreeCluster(secondCluster)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1373,7 +1379,7 @@ func TestDeleteFATFailureRollsBackCurrentFATEntry(t *testing.T) {
 		)
 	}
 
-	value, err := fs.readFATEntry(secondCluster)
+	value, err = fs.readFATEntry(secondCluster)
 	if err != nil {
 		t.Fatal(err)
 	}

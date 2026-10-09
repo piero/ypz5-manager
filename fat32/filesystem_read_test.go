@@ -3362,8 +3362,9 @@ func TestFileReadAllTrimsFinalClusterToFileSize(t *testing.T) {
 	}
 }
 
-// Test that an LFN sequence without the last-entry flag is rejected.
-func TestReadDirectoryRejectsLFNWithoutLastFlag(t *testing.T) {
+// Test that an LFN sequence without the last-entry flag is ignored and
+// the 8.3 name is used.
+func TestReadDirectoryIgnoresLFNWithoutLastFlag(t *testing.T) {
 	const (
 		sectorSize      = 512
 		bytesPerCluster = 512
@@ -3413,13 +3414,11 @@ func TestReadDirectoryRejectsLFNWithoutLastFlag(t *testing.T) {
 		BytesPerCluster: bytesPerCluster,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN without last-entry flag")
-	}
+	assertOnlyEntry(t, fs, "FILE.TXT")
 }
 
-// Test that an LFN sequence with a missing sequence number is rejected.
-func TestReadDirectoryRejectsLFNWithMissingSequence(t *testing.T) {
+// Test that an LFN sequence with a missing sequence number is ignored.
+func TestReadDirectoryIgnoresLFNWithMissingSequence(t *testing.T) {
 	const (
 		sectorSize      = 512
 		bytesPerCluster = 512
@@ -3469,13 +3468,11 @@ func TestReadDirectoryRejectsLFNWithMissingSequence(t *testing.T) {
 		BytesPerCluster: bytesPerCluster,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with missing sequence")
-	}
+	assertOnlyEntry(t, fs, "FILE.TXT")
 }
 
-// Test that duplicate LFN sequence numbers are rejected.
-func TestReadDirectoryRejectsLFNWithDuplicateSequence(t *testing.T) {
+// Test that an LFN sequence with duplicate sequence numbers is ignored.
+func TestReadDirectoryIgnoresLFNWithDuplicateSequence(t *testing.T) {
 	const (
 		sectorSize      = 512
 		bytesPerCluster = 512
@@ -3532,13 +3529,11 @@ func TestReadDirectoryRejectsLFNWithDuplicateSequence(t *testing.T) {
 		BytesPerCluster: bytesPerCluster,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted duplicate LFN sequence")
-	}
+	assertOnlyEntry(t, fs, "FILE.TXT")
 }
 
 // This test rejects an LFN entry with reserved sequence bit 5 set.
-func TestReadDirectoryRejectsLFNWithReservedSequenceBit(t *testing.T) {
+func TestReadDirectoryIgnoresLFNWithReservedSequenceBit(t *testing.T) {
 	var shortName [11]byte
 	copy(shortName[:], []byte("TEST    TXT"))
 
@@ -3577,7 +3572,7 @@ func TestReadDirectoryRejectsLFNWithReservedSequenceBit(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 	fs.layout = Layout{
@@ -3586,13 +3581,11 @@ func TestReadDirectoryRejectsLFNWithReservedSequenceBit(t *testing.T) {
 		BytesPerCluster: 4096,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with reserved sequence bit")
-	}
+	assertOnlyEntry(t, fs, "TEST.TXT")
 }
 
 // This test rejects an LFN entry with reserved sequence bit 7 set.
-func TestReadDirectoryRejectsLFNWithHighReservedSequenceBit(t *testing.T) {
+func TestReadDirectoryIgnoresLFNWithHighReservedSequenceBit(t *testing.T) {
 	var shortName [11]byte
 	copy(shortName[:], []byte("TEST    TXT"))
 
@@ -3631,7 +3624,7 @@ func TestReadDirectoryRejectsLFNWithHighReservedSequenceBit(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 	fs.layout = Layout{
@@ -3640,13 +3633,11 @@ func TestReadDirectoryRejectsLFNWithHighReservedSequenceBit(t *testing.T) {
 		BytesPerCluster: 4096,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with high reserved sequence bit")
-	}
+	assertOnlyEntry(t, fs, "TEST.TXT")
 }
 
 // This test rejects an LFN entry with sequence number zero.
-func TestReadDirectoryRejectsLFNWithZeroSequence(t *testing.T) {
+func TestReadDirectoryIgnoresLFNWithZeroSequence(t *testing.T) {
 	var shortName [11]byte
 	copy(shortName[:], []byte("TEST    TXT"))
 
@@ -3686,7 +3677,7 @@ func TestReadDirectoryRejectsLFNWithZeroSequence(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 	fs.layout = Layout{
@@ -3695,13 +3686,12 @@ func TestReadDirectoryRejectsLFNWithZeroSequence(t *testing.T) {
 		BytesPerCluster: 4096,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with zero sequence")
-	}
+	assertOnlyEntry(t, fs, "TEST.TXT")
 }
 
-// This test rejects an LFN sequence with the last-entry flag on a later entry.
-func TestReadDirectoryRejectsLFNWithUnexpectedLastFlag(t *testing.T) {
+// A last-entry flag on a later entry starts a new LFN run: the earlier
+// entry is orphaned and the later, valid run names the file.
+func TestReadDirectoryUsesLastLFNRunAfterUnexpectedLastFlag(t *testing.T) {
 	var shortName [11]byte
 	copy(shortName[:], []byte("TEST    TXT"))
 
@@ -3749,7 +3739,7 @@ func TestReadDirectoryRejectsLFNWithUnexpectedLastFlag(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 	fs.layout = Layout{
@@ -3758,9 +3748,7 @@ func TestReadDirectoryRejectsLFNWithUnexpectedLastFlag(t *testing.T) {
 		BytesPerCluster: 4096,
 	}
 
-	if _, err := fs.ReadRootDirectory(); err == nil {
-		t.Fatal("ReadRootDirectory unexpectedly accepted LFN with unexpected last-entry flag")
-	}
+	assertOnlyEntry(t, fs, "B")
 }
 
 // This test verifies that a directory listing exposes "." and ".." entries.
@@ -3797,7 +3785,7 @@ func TestReadDirectoryIncludesDotEntries(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 	fs.layout = Layout{
@@ -3952,7 +3940,7 @@ func TestReadDirectoryIgnoresVolumeLabel(t *testing.T) {
 		ReservedSectors:   1,
 		NumberOfFATs:      1,
 		SectorsPerFAT:     1,
-		TotalSectors:      9,
+		TotalSectors:      10,
 		RootCluster:       2,
 	}
 
@@ -4796,5 +4784,24 @@ func TestClusterChainRejectsReservedFATValue(t *testing.T) {
 	_, err := fs.ClusterChain(2)
 	if err == nil {
 		t.Fatal("ClusterChain returned nil error for reserved FAT value")
+	}
+}
+
+// assertOnlyEntry checks that the root directory lists exactly one entry,
+// named want.
+func assertOnlyEntry(t *testing.T, fs *Filesystem, want string) {
+	t.Helper()
+
+	entries, err := fs.ReadRootDirectory()
+	if err != nil {
+		t.Fatalf("ReadRootDirectory: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+
+	if entries[0].Name != want {
+		t.Fatalf("name = %q, want %q", entries[0].Name, want)
 	}
 }
