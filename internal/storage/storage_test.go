@@ -1,4 +1,4 @@
-package main
+package storage
 
 import (
 	"encoding/binary"
@@ -39,7 +39,7 @@ func TestOpenStorageReadsAndWritesAtTheDetectedPartitionOffset(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	storage, err := openStorage(file.Name(), true, false)
+	storage, err := Open(file.Name(), true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestOpenStorageUsesZeroOffsetForFAT32PartitionImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	storage, err := openStorage(file.Name(), false, false)
+	storage, err := Open(file.Name(), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

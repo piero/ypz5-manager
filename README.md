@@ -135,31 +135,38 @@ diskutil eject /dev/disk4
 ## Application structure
 
 ```
-┌─────────────────┐
-│   Bubble Tea    │
-│      TUI        │
-└────────┬────────┘
-         │
-         │ commands
-         ▼
-┌─────────────────┐
-│   application   │
-│     model       │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   FAT32 layer   │
-│                 │
-│ list            │
-│ read            │
-│ delete          │
-│ mkdir           │
-│ etc.            │
-└────────┬────────┘
-         │
-         ▼
-   /dev/rdisk4s1
+main.go                  flags; opens the storage and the filesystem; starts the TUI
+cmd/inspect/             read-only inspection tool
+internal/tui/            Bubble Tea screens
+  model.go                 state, dispatch to the active screen, scrolling
+  browser.go               YP-Z5 browser and file details
+  local.go                 "add files from this Mac" screen
+  local_browser.go         local folder listing and selection
+  picker.go                destination picker
+  copy.go                  copy progress and summary
+  confirm.go               device-write and delete confirmations
+  scroll.go, theme.go      list scrolling; color palettes
+internal/transfer/       copy planning and execution (Mac → YP-Z5), no UI
+internal/storage/        image/device access: partition offset, flush, mount guard
+internal/testimage/      test helper: writable clone of the YP-Z5 image
+fat32/                   the FAT32 filesystem (see `go doc ./fat32`)
+```
+
+```
+┌─────────────────┐      ┌──────────────────┐
+│  internal/tui   │─────▶│ internal/transfer│
+└────────┬────────┘      └────────┬─────────┘
+         │                        │
+         ▼                        ▼
+┌──────────────────────────────────────────┐
+│                 fat32                    │
+└────────────────────┬─────────────────────┘
+                     │ io.ReaderAt / io.WriterAt
+┌────────────────────▼─────────────────────┐
+│             internal/storage             │
+└────────────────────┬─────────────────────┘
+                     ▼
+        disk image  or  /dev/rdisk4
 ```
 
 The FAT32 package allows navigating the filesystem without knowing anything about physical sectors:

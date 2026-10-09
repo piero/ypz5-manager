@@ -1,6 +1,7 @@
-package main
+package tui
 
 import (
+	"path"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -28,7 +29,7 @@ func defaultDest(fs *fat32.Filesystem) string {
 		return "/"
 	}
 
-	return joinPath("/", entry.Name)
+	return path.Join("/", entry.Name)
 }
 
 func newDestPicker(fs *fat32.Filesystem, path string) (*destPicker, error) {
@@ -104,7 +105,7 @@ func (m model) updateDestPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		path := joinPath(p.path, p.entries[p.cursor].Name)
+		path := path.Join(p.path, p.entries[p.cursor].Name)
 
 		if err := p.load(m.fs, path); err != nil {
 			m.pickerError = err
@@ -115,7 +116,7 @@ func (m model) updateDestPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if err := p.load(m.fs, parentPath(p.path)); err != nil {
+		if err := p.load(m.fs, path.Dir(p.path)); err != nil {
 			m.pickerError = err
 		}
 	}

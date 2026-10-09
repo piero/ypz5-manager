@@ -503,4 +503,3 @@ func (b *failDirectoryAndFATRollbackBuffer) WriteAt(p []byte, off int64) (int, e
 
 	return len(p), nil
 }
-

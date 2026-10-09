@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"fmt"
@@ -6,12 +6,14 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/piero/ypz5/internal/transfer"
 )
 
 // copyJob tracks a running copy. Each step runs as its own command, so
 // the screen updates between files and the copy can be cancelled.
 type copyJob struct {
-	plan      copyPlan
+	plan      transfer.Plan
 	dest      string
 	next      int
 	copied    int
@@ -23,7 +25,7 @@ type copyJob struct {
 }
 
 type copyStepMsg struct {
-	op      copyOp
+	op      transfer.Op
 	skipped string
 	err     error
 }
@@ -34,18 +36,18 @@ type copyStepMsg struct {
 func (m model) nextCopyStep() tea.Cmd {
 	job := m.copy
 
-	if job.cancelled || job.next >= len(job.plan.ops) {
+	if job.cancelled || job.next >= len(job.plan.Ops) {
 		job.done = true
-		job.skipped = append(job.plan.skipped, job.skipped...)
+		job.skipped = append(job.plan.Skipped, job.skipped...)
 
 		return nil
 	}
 
 	fs := m.fs
-	op := job.plan.ops[job.next]
+	op := job.plan.Ops[job.next]
 
 	return func() tea.Msg {
-		skipped, err := runCopyOp(fs, op)
+		skipped, err := transfer.Run(fs, op)
 
 		return copyStepMsg{op: op, skipped: skipped, err: err}
 	}
@@ -58,14 +60,14 @@ func (m model) updateCopy(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case copyStepMsg:
 		switch {
 		case msg.err != nil:
-			job.errors = append(job.errors, fmt.Sprintf("%s: %v", msg.op.dest, msg.err))
+			job.errors = append(job.errors, fmt.Sprintf("%s: %v", msg.op.Dest, msg.err))
 
 		case msg.skipped != "":
 			job.skipped = append(job.skipped, msg.skipped)
 
-		case !msg.op.isDir:
+		case !msg.op.IsDir:
 			job.copied++
-			job.written += msg.op.size
+			job.written += msg.op.Size
 		}
 
 		job.next++
@@ -119,15 +121,15 @@ func (m model) copyView() string {
 		s += p.label("Copying to", job.dest) + "\n\n"
 		s += fmt.Sprintf(
 			"%s  %d/%d  %s of %s\n",
-			progressBar(job.written, job.plan.bytes, 30),
+			progressBar(job.written, job.plan.Bytes, 30),
 			job.next,
-			len(job.plan.ops),
-			formatSize(job.written),
-			formatSize(job.plan.bytes),
+			len(job.plan.Ops),
+			transfer.FormatSize(job.written),
+			transfer.FormatSize(job.plan.Bytes),
 		)
 
-		if job.next < len(job.plan.ops) {
-			s += "\n" + dimStyle.render(path.Base(job.plan.ops[job.next].dest)) + "\n"
+		if job.next < len(job.plan.Ops) {
+			s += "\n" + dimStyle.render(path.Base(job.plan.Ops[job.next].Dest)) + "\n"
 		}
 
 		if job.cancelled {
@@ -153,7 +155,7 @@ func (m model) copyView() string {
 	s += fmt.Sprintf(
 		"Copied:  %d files (%s)\n",
 		job.copied,
-		formatSize(job.written),
+		transfer.FormatSize(job.written),
 	)
 
 	s += listSection(warningStyle, "Skipped", job.skipped)

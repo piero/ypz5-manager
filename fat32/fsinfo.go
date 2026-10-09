@@ -2,7 +2,6 @@ package fat32
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 )
 
@@ -113,11 +112,6 @@ func (fs *Filesystem) FreeClusters() (count uint32, ok bool) {
 	return fs.info.freeCount, true
 }
 
-// BytesPerCluster returns the allocation unit size.
-func (fs *Filesystem) BytesPerCluster() int64 {
-	return fs.layout.BytesPerCluster
-}
-
 func (fs *Filesystem) writeFSInfo() error {
 	if !fs.info.present || !fs.info.dirty {
 		return nil
@@ -148,32 +142,4 @@ func (fs *Filesystem) writeFSInfo() error {
 	fs.info.dirty = false
 
 	return nil
-}
-
-// syncer is implemented by writers that can flush to stable storage,
-// such as *os.File.
-type syncer interface {
-	Sync() error
-}
-
-// commit finishes a top-level mutation: it writes FSInfo and flushes
-// the writer to stable storage. It runs even when the mutation failed,
-// because a failed operation may still have changed the disk. Any error
-// is joined into *errp.
-func (fs *Filesystem) commit(errp *error) {
-	var commitErr error
-
-	if err := fs.writeFSInfo(); err != nil {
-		commitErr = errors.Join(commitErr, err)
-	}
-
-	if s, ok := fs.writer.(syncer); ok {
-		if err := s.Sync(); err != nil {
-			commitErr = errors.Join(commitErr, fmt.Errorf("sync: %w", err))
-		}
-	}
-
-	if commitErr != nil {
-		*errp = errors.Join(*errp, commitErr)
-	}
 }

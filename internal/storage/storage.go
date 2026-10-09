@@ -1,4 +1,7 @@
-package main
+// Package storage opens disk images and devices holding a FAT32
+// filesystem. It finds the filesystem inside a partitioned disk, flushes
+// writes to the medium, and refuses to write to a mounted device.
+package storage
 
 import (
 	"fmt"
@@ -11,14 +14,19 @@ import (
 	"github.com/piero/ypz5/fat32"
 )
 
-type storage struct {
+// Storage is a disk image or device holding a FAT32 filesystem. Reads
+// and writes are relative to the start of the filesystem, which may be
+// inside a partition of a whole-disk image or device.
+type Storage struct {
 	file     *os.File
 	offset   int64
 	source   string
 	isDevice bool
 }
 
-func openStorage(path string, writable bool, isDevice bool) (*storage, error) {
+// Open opens an image file or device. A writable device is refused
+// while any partition of its disk is mounted.
+func Open(path string, writable bool, isDevice bool) (*Storage, error) {
 	if writable && isDevice {
 		if err := checkNotMounted(path); err != nil {
 			return nil, err
@@ -41,7 +49,7 @@ func openStorage(path string, writable bool, isDevice bool) (*storage, error) {
 		return nil, err
 	}
 
-	return &storage{
+	return &Storage{
 		file:     f,
 		offset:   offset,
 		source:   path,
@@ -49,35 +57,35 @@ func openStorage(path string, writable bool, isDevice bool) (*storage, error) {
 	}, nil
 }
 
-func (s *storage) Source() string {
+func (s *Storage) Source() string {
 	return s.source
 }
 
-func (s *storage) IsDevice() bool {
+func (s *Storage) IsDevice() bool {
 	return s.isDevice
 }
 
-func (s *storage) Close() error {
+func (s *Storage) Close() error {
 	return s.file.Close()
 }
 
 // Sync flushes all writes to the medium. The fat32 package calls it at
 // the end of every operation that modifies the filesystem.
-func (s *storage) Sync() error {
+func (s *Storage) Sync() error {
 	return fullSync(s.file)
 }
 
-func (s *storage) ReadAt(p []byte, off int64) (int, error) {
+func (s *Storage) ReadAt(p []byte, off int64) (int, error) {
 	return s.file.ReadAt(p, s.offset+off)
 }
 
-func (s *storage) WriteAt(p []byte, off int64) (int, error) {
+func (s *Storage) WriteAt(p []byte, off int64) (int, error) {
 	return s.file.WriteAt(p, s.offset+off)
 }
 
 var (
-	_ io.ReaderAt = (*storage)(nil)
-	_ io.WriterAt = (*storage)(nil)
+	_ io.ReaderAt = (*Storage)(nil)
+	_ io.WriterAt = (*Storage)(nil)
 )
 
 // listMountedDevices is a variable so tests can fake the mount table.

@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"fmt"
@@ -82,4 +82,13 @@ func truncateName(name string, width int) string {
 	}
 
 	return string(runes[:width-1]) + "…"
+}
+
+// pageSize is how far PgUp/PgDn move in a list showing rows entries.
+func pageSize(rows int) int {
+	if rows <= 1 {
+		return 10
+	}
+
+	return rows - 1
 }
