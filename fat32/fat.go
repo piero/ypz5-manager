@@ -269,6 +269,8 @@ func (fs *Filesystem) writeFATEntry(
 
 	sectors := make([]fatSector, 0, fs.boot.NumberOfFATs)
 
+	var previous uint32
+
 	// Prepare all FAT sectors before writing anything.
 	for fat := uint8(0); fat < fs.boot.NumberOfFATs; fat++ {
 		offset := fs.layout.FATOffset +
@@ -293,6 +295,10 @@ func (fs *Filesystem) writeFATEntry(
 		oldValue := binary.LittleEndian.Uint32(
 			buf[entryOffset : entryOffset+4],
 		)
+
+		if fat == 0 {
+			previous = oldValue & 0x0FFFFFFF
+		}
 
 		newValue := (oldValue & 0xF0000000) | value
 
@@ -382,6 +388,8 @@ func (fs *Filesystem) writeFATEntry(
 			)
 		}
 	}
+
+	fs.noteFATChange(cluster, previous, value)
 
 	return nil
 }

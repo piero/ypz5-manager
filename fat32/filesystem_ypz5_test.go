@@ -3,6 +3,7 @@ package fat32
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -149,6 +150,21 @@ func openYPZ5WriteImageWithPath(t *testing.T) (string, *os.File, *Filesystem) {
 		_ = destination.Close()
 	})
 
+	// Every mutating test must leave a consistent filesystem. Cleanups
+	// run in reverse order, so this runs before the image is closed.
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+
+		// Some tests close the image themselves to reopen it.
+		if _, err := destination.Stat(); errors.Is(err, os.ErrClosed) {
+			return
+		}
+
+		checkConsistency(t, fs)
+	})
+
 	return testPath, destination, fs
 }
 
@@ -165,6 +181,12 @@ func cloneYPZ5Image(t *testing.T, sourcePath, destinationPath string) {
 		)
 
 		if output, err := cmd.CombinedOutput(); err == nil {
+			// The clone keeps the source's mode, and the pristine
+			// image is expected to be read-only.
+			if err := os.Chmod(destinationPath, 0600); err != nil {
+				t.Fatalf("make cloned image writable: %v", err)
+			}
+
 			return
 		} else {
 			t.Logf(
@@ -944,8 +966,9 @@ func TestYPZ5EndToEndLifecycleWithMtools(t *testing.T) {
 		)
 	}
 
-	// mtools displays the generated 8.3 alias rather than the long filename.
-	if !bytes.Contains(output, []byte("HELLO    TXT")) {
+	// mtools displays the 8.3 name, lower-cased according to the NT
+	// case flags.
+	if !bytes.Contains(bytes.ToUpper(output), []byte("HELLO    TXT")) {
 		t.Fatalf(
 			"mtools directory listing does not contain HELLO.TXT:\n%s",
 			output,

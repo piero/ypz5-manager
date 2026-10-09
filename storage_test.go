@@ -98,3 +98,41 @@ func TestOpenStorageUsesZeroOffsetForFAT32PartitionImages(t *testing.T) {
 		t.Fatalf("got %q, want %q", string(buf), "FAT32   ")
 	}
 }
+
+// TestCheckNotMounted verifies that writing is refused while any partition
+// of the same disk is mounted.
+func TestCheckNotMounted(t *testing.T) {
+	original := listMountedDevices
+	t.Cleanup(func() { listMountedDevices = original })
+
+	listMountedDevices = func() ([]string, error) {
+		return []string{"/dev/disk3s1", "/dev/disk4s1", "map auto_home"}, nil
+	}
+
+	tests := []struct {
+		device  string
+		wantErr bool
+	}{
+		{"/dev/disk4", true},
+		{"/dev/rdisk4", true},
+		{"/dev/rdisk4s1", true},
+		{"/dev/disk4s2", true},
+		{"/dev/disk5", false},
+		{"/dev/rdisk41", false},
+		{"/tmp/image.img", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.device, func(t *testing.T) {
+			err := checkNotMounted(tt.device)
+
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+
+			if !tt.wantErr && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

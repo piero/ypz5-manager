@@ -2630,11 +2630,11 @@ func TestOpenFileParentTraversal(t *testing.T) {
 		)
 	}
 
-	if file.Name() != "FILE.TXT" {
+	if file.Name() != "file.txt" {
 		t.Fatalf(
 			"File.Name() = %q, want %q",
 			file.Name(),
-			"FILE.TXT",
+			"file.txt",
 		)
 	}
 }
@@ -2780,11 +2780,11 @@ func TestOpenFileEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if file.Name() != "EMPTY.TXT" {
+	if file.Name() != "empty.txt" {
 		t.Fatalf(
 			"File.Name() = %q, want %q",
 			file.Name(),
-			"EMPTY.TXT",
+			"empty.txt",
 		)
 	}
 

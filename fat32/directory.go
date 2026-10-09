@@ -8,17 +8,41 @@ import (
 	"unicode/utf16"
 )
 
+// Directory entry attribute bits.
+const (
+	AttrReadOnly  = 0x01
+	AttrHidden    = 0x02
+	AttrSystem    = 0x04
+	AttrVolumeID  = 0x08
+	AttrDirectory = 0x10
+	AttrArchive   = 0x20
+)
+
+// NT case flags stored at offset 0x0C of a short entry: the 8.3 name is
+// stored upper-case, and these bits say which parts to show lower-case.
+const (
+	caseLowerBase = 0x08
+	caseLowerExt  = 0x10
+)
+
 // what the application sees
 type DirectoryEntry struct {
 	Name         string
 	ShortName    string
 	IsDir        bool
+	Attr         uint8
 	Size         uint32
 	StartCluster uint32
 
 	EntryCluster uint32
 	EntryOffset  uint32
 	LFNEntries   uint8
+}
+
+// Protected reports whether the entry is read-only or a system entry.
+// Such entries are never deleted or replaced.
+func (e DirectoryEntry) Protected() bool {
+	return e.Attr&(AttrReadOnly|AttrSystem) != 0
 }
 
 type directoryEntryLocation struct {
@@ -161,7 +185,7 @@ func (fs *Filesystem) readDirectoryRecords(startCluster uint32) ([]directoryReco
 				dirEntry.Name = combineLFN(lfn)
 				dirEntry.LFNEntries = uint8(len(lfn))
 			} else {
-				dirEntry.Name = dirEntry.ShortName
+				dirEntry.Name = parseShortNameWithCase(entry)
 			}
 
 			dirEntry.EntryCluster = cluster
@@ -198,6 +222,31 @@ func parseShortName(data []byte) string {
 	return name + "." + ext
 }
 
+// parseShortNameWithCase returns the 8.3 name, lower-casing the base
+// and/or extension as requested by the entry's NT case flags.
+func parseShortNameWithCase(data []byte) string {
+	name := strings.TrimRight(string(data[0:8]), " ")
+	ext := strings.TrimRight(string(data[8:11]), " ")
+
+	if data[0x0C]&caseLowerBase != 0 {
+		name = strings.ToLower(name)
+	}
+
+	if data[0x0C]&caseLowerExt != 0 {
+		ext = strings.ToLower(ext)
+	}
+
+	if ext == "" {
+		return name
+	}
+
+	return name + "." + ext
+}
+
+// shortNameInvalidChars are printable ASCII characters that are not
+// allowed in an 8.3 name.
+const shortNameInvalidChars = `"*+,./:;<=>?[\]| `
+
 func encodeShortName(name string) ([11]byte, error) {
 	var result [11]byte
 
@@ -223,7 +272,7 @@ func encodeShortName(name string) ([11]byte, error) {
 				)
 			}
 
-			if strings.ContainsRune(`"*/:<>?\|+=[ ]`, rune(c)) {
+			if strings.ContainsRune(shortNameInvalidChars, rune(c)) {
 				return result, fmt.Errorf(
 					"invalid character %q in short name %q",
 					c,
@@ -246,13 +295,104 @@ func encodeShortName(name string) ([11]byte, error) {
 	return result, nil
 }
 
+// isShortName reports whether name can be stored as an 8.3 entry alone,
+// without LFN entries. The base and extension may each be entirely upper
+// or lower case (lower case is recorded with NT case flags); mixed case
+// needs an LFN to be preserved.
 func isShortName(name string) bool {
 	encoded, err := encodeShortName(name)
 	if err != nil {
 		return false
 	}
 
-	return parseShortName(encoded[:]) == strings.ToUpper(name)
+	if parseShortName(encoded[:]) != strings.ToUpper(name) {
+		return false
+	}
+
+	for _, part := range strings.SplitN(name, ".", 2) {
+		if part != strings.ToUpper(part) && part != strings.ToLower(part) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// shortNameCaseFlags returns the NT case flags that make an 8.3 entry
+// display as name. It assumes isShortName(name) is true.
+func shortNameCaseFlags(name string) byte {
+	parts := strings.SplitN(name, ".", 2)
+
+	var flags byte
+
+	if parts[0] != strings.ToUpper(parts[0]) {
+		flags |= caseLowerBase
+	}
+
+	if len(parts) == 2 && parts[1] != strings.ToUpper(parts[1]) {
+		flags |= caseLowerExt
+	}
+
+	return flags
+}
+
+// shortNameChars converts s to characters valid in an 8.3 name, the way
+// Windows does: letters are upper-cased, spaces and dots are dropped and
+// any other invalid or non-ASCII character becomes '_'.
+func shortNameChars(s string) string {
+	var b strings.Builder
+
+	for _, r := range s {
+		switch {
+		case r == ' ' || r == '.':
+			continue
+
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 'a' + 'A')
+
+		case r < 0x21 || r > 0x7E ||
+			strings.ContainsRune(shortNameInvalidChars, r):
+			b.WriteByte('_')
+
+		default:
+			b.WriteRune(r)
+		}
+	}
+
+	return b.String()
+}
+
+// validateLongName checks that name can be stored as a FAT long filename.
+func validateLongName(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("invalid file name: %q", name)
+	}
+
+	if len(utf16.Encode([]rune(name))) > 255 {
+		return fmt.Errorf(
+			"file name is longer than 255 characters: %q",
+			name,
+		)
+	}
+
+	for _, r := range name {
+		if r < 0x20 || strings.ContainsRune(`"*/:<>?\|`, r) {
+			return fmt.Errorf(
+				"invalid character %q in file name %q",
+				r,
+				name,
+			)
+		}
+	}
+
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return fmt.Errorf(
+			"file name ends with a dot or space: %q",
+			name,
+		)
+	}
+
+	return nil
 }
 
 func generateShortName(name string, n int) ([11]byte, error) {
@@ -262,29 +402,20 @@ func generateShortName(name string, n int) ([11]byte, error) {
 		return result, fmt.Errorf("invalid short-name sequence: %d", n)
 	}
 
-	parts := strings.SplitN(name, ".", 2)
+	// Leading dots are not part of the extension (".DS_Store").
+	name = strings.TrimLeft(name, ".")
 
-	base := parts[0]
+	base := name
 	ext := ""
 
-	if len(parts) == 2 {
-		ext = parts[1]
+	// The extension is whatever follows the last dot.
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		base = name[:i]
+		ext = name[i+1:]
 	}
 
-	var prefix string
-
-	for i := 0; i < len(base); i++ {
-		c := base[i]
-
-		if c >= 'a' && c <= 'z' {
-			c -= 'a' - 'A'
-		}
-
-		if c >= 'A' && c <= 'Z' ||
-			c >= '0' && c <= '9' {
-			prefix += string(c)
-		}
-	}
+	prefix := shortNameChars(base)
+	ext = shortNameChars(ext)
 
 	if prefix == "" {
 		prefix = "FILE"
@@ -312,7 +443,7 @@ func generateShortName(name string, n int) ([11]byte, error) {
 	}
 
 	copy(result[0:8], []byte(fmt.Sprintf("%-8s", shortName)))
-	copy(result[8:11], []byte(fmt.Sprintf("%-3s", strings.ToUpper(ext))))
+	copy(result[8:11], []byte(fmt.Sprintf("%-3s", ext)))
 
 	return result, nil
 }
@@ -342,7 +473,8 @@ func parseDirectoryEntry(data []byte) (DirectoryEntry, error) {
 
 	return DirectoryEntry{
 		ShortName:    parseShortName(data),
-		IsDir:        attr&0x10 != 0,
+		IsDir:        attr&AttrDirectory != 0,
+		Attr:         attr,
 		Size:         binary.LittleEndian.Uint32(data[0x1C:0x20]),
 		StartCluster: startCluster,
 	}, nil
@@ -1258,6 +1390,10 @@ func encodeDirectoryRecordWithShortName(
 		startCluster,
 		size,
 	)
+
+	if isShortName(name) {
+		shortEntry[0x0C] = shortNameCaseFlags(name)
+	}
 
 	result.Short = shortEntry
 

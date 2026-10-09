@@ -12,6 +12,15 @@ type Filesystem struct {
 	writer io.WriterAt
 	boot   BootSector
 	layout Layout
+	info   fsInfo
+}
+
+// ErrProtected is returned when an operation would modify or remove a
+// read-only or system entry, such as the YP-Z5's System directory.
+var ErrProtected = errors.New("read-only or system entry")
+
+func isProtected(entry DirectoryEntry) bool {
+	return entry.Protected()
 }
 
 var errDirectoryFull = errors.New("directory is full")
@@ -66,6 +75,16 @@ func (fs *Filesystem) Open() error {
 	fs.boot = boot
 	fs.layout = boot.Layout()
 
+	if fs.writer != nil && boot.FATMirroringDisabled() {
+		return fmt.Errorf(
+			"FAT mirroring is disabled; writing is not supported",
+		)
+	}
+
+	if err := fs.loadFSInfo(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -77,7 +96,17 @@ func (fs *Filesystem) BootSector() BootSector {
 	return fs.boot
 }
 
-func (fs *Filesystem) Delete(path string) error {
+func (fs *Filesystem) Delete(path string) (err error) {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	defer fs.commit(&err)
+
+	return fs.deleteFile(path)
+}
+
+func (fs *Filesystem) deleteFile(path string) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
@@ -89,6 +118,10 @@ func (fs *Filesystem) Delete(path string) error {
 
 	if record.Entry.IsDir {
 		return fmt.Errorf("%q is a directory", path)
+	}
+
+	if isProtected(record.Entry) {
+		return fmt.Errorf("delete %q: %w", path, ErrProtected)
 	}
 
 	// Read the complete chain before making any modifications.
@@ -155,13 +188,27 @@ func (fs *Filesystem) writeNewFileData(data []byte) ([]uint32, error) {
 // 4. allocate + write file data
 // 5. create directory entry
 // 6. if directory creation fails → free allocated chain
-func (fs *Filesystem) WriteFile(path string, data []byte) error {
+func (fs *Filesystem) WriteFile(path string, data []byte) (err error) {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	defer fs.commit(&err)
+
+	return fs.writeFile(path, data)
+}
+
+func (fs *Filesystem) writeFile(path string, data []byte) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
 
 	parentPath, name, err := splitFilePath(path)
 	if err != nil {
+		return err
+	}
+
+	if err := validateLongName(name); err != nil {
 		return err
 	}
 
@@ -208,7 +255,17 @@ func (fs *Filesystem) WriteFile(path string, data []byte) error {
 	return nil
 }
 
-func (fs *Filesystem) ReplaceFile(path string, data []byte) error {
+func (fs *Filesystem) ReplaceFile(path string, data []byte) (err error) {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	defer fs.commit(&err)
+
+	return fs.replaceFile(path, data)
+}
+
+func (fs *Filesystem) replaceFile(path string, data []byte) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
@@ -234,6 +291,10 @@ func (fs *Filesystem) ReplaceFile(path string, data []byte) error {
 
 	if record.Entry.IsDir {
 		return fmt.Errorf("%q is a directory", path)
+	}
+
+	if isProtected(record.Entry) {
+		return fmt.Errorf("replace %q: %w", path, ErrProtected)
 	}
 
 	var oldChain []uint32
@@ -336,13 +397,27 @@ func (fs *Filesystem) ReplaceFile(path string, data []byte) error {
 	return nil
 }
 
-func (fs *Filesystem) Mkdir(path string) error {
+func (fs *Filesystem) Mkdir(path string) (err error) {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	defer fs.commit(&err)
+
+	return fs.mkdir(path)
+}
+
+func (fs *Filesystem) mkdir(path string) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
 
 	parentPath, name, err := splitFilePath(path)
 	if err != nil {
+		return err
+	}
+
+	if err := validateLongName(name); err != nil {
 		return err
 	}
 
@@ -733,7 +808,60 @@ func (fs *Filesystem) createDirectoryRecord(
 	return nil
 }
 
-func (fs *Filesystem) RemoveAll(path string) error {
+func (fs *Filesystem) RemoveAll(path string) (err error) {
+	if err := fs.writable(); err != nil {
+		return err
+	}
+
+	defer fs.commit(&err)
+
+	if err := fs.checkRemovable(path); err != nil {
+		return err
+	}
+
+	return fs.removeAll(path)
+}
+
+// checkRemovable walks path and fails with ErrProtected if it is, or
+// contains, a protected entry, so RemoveAll never deletes part of a tree
+// and then stops.
+func (fs *Filesystem) checkRemovable(path string) error {
+	record, err := fs.findDirectoryRecord(path)
+	if err != nil {
+		return err
+	}
+
+	return fs.checkRemovableEntry(path, record.Entry)
+}
+
+func (fs *Filesystem) checkRemovableEntry(path string, entry DirectoryEntry) error {
+	if isProtected(entry) {
+		return fmt.Errorf("remove %q: %w", path, ErrProtected)
+	}
+
+	if !entry.IsDir {
+		return nil
+	}
+
+	children, err := fs.readDirectory(entry.StartCluster)
+	if err != nil {
+		return err
+	}
+
+	for _, child := range children {
+		if child.Name == "." || child.Name == ".." {
+			continue
+		}
+
+		if err := fs.checkRemovableEntry(path+"/"+child.Name, child); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) removeAll(path string) error {
 	if err := fs.writable(); err != nil {
 		return err
 	}
@@ -744,7 +872,7 @@ func (fs *Filesystem) RemoveAll(path string) error {
 	}
 
 	if !record.Entry.IsDir {
-		return fs.Delete(path)
+		return fs.deleteFile(path)
 	}
 
 	// Never allow the filesystem root to be removed.
@@ -769,7 +897,7 @@ func (fs *Filesystem) RemoveAll(path string) error {
 		}
 		childPath += child.Entry.Name
 
-		if err := fs.RemoveAll(childPath); err != nil {
+		if err := fs.removeAll(childPath); err != nil {
 			return err
 		}
 	}

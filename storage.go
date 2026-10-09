@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 const (
@@ -28,6 +31,12 @@ type storage struct {
 }
 
 func openStorage(path string, writable bool, isDevice bool) (*storage, error) {
+	if writable && isDevice {
+		if err := checkNotMounted(path); err != nil {
+			return nil, err
+		}
+	}
+
 	flags := os.O_RDONLY
 	if writable {
 		flags = os.O_RDWR
@@ -62,6 +71,12 @@ func (s *storage) IsDevice() bool {
 
 func (s *storage) Close() error {
 	return s.file.Close()
+}
+
+// Sync flushes all writes to the medium. The fat32 package calls it at
+// the end of every operation that modifies the filesystem.
+func (s *storage) Sync() error {
+	return fullSync(s.file)
 }
 
 func (s *storage) ReadAt(p []byte, off int64) (int, error) {
@@ -138,4 +153,50 @@ func isFAT32PartitionType(partitionType byte) bool {
 	default:
 		return false
 	}
+}
+
+// listMountedDevices is a variable so tests can fake the mount table.
+var listMountedDevices = mountedDevices
+
+var wholeDiskPattern = regexp.MustCompile(`^r?(disk[0-9]+)`)
+
+// checkNotMounted refuses to write to a device while any partition of
+// the same disk is mounted: the OS would keep its own cached view of the
+// filesystem and the two writers would corrupt it.
+func checkNotMounted(devicePath string) error {
+	match := wholeDiskPattern.FindStringSubmatch(filepath.Base(devicePath))
+	if match == nil {
+		return nil
+	}
+
+	disk := match[1]
+
+	mounted, err := listMountedDevices()
+	if err != nil {
+		return fmt.Errorf("list mounted filesystems: %w", err)
+	}
+
+	for _, device := range mounted {
+		if isSameDisk(filepath.Base(device), disk) {
+			return fmt.Errorf(
+				"%s is mounted; run `diskutil unmountDisk /dev/%s` first",
+				device,
+				disk,
+			)
+		}
+	}
+
+	return nil
+}
+
+// isSameDisk reports whether name ("disk4", "disk4s1") is disk or one of
+// its partitions.
+func isSameDisk(name, disk string) bool {
+	if name == disk {
+		return true
+	}
+
+	rest, ok := strings.CutPrefix(name, disk+"s")
+
+	return ok && rest != ""
 }

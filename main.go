@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -74,6 +75,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		// Errors are shown until the next key press.
+		m.err = nil
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -99,6 +103,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			entry := m.entries[m.cursor]
+
+			if entry.Protected() {
+				m.err = fmt.Errorf(
+					"%q is read-only or a system entry and cannot be deleted",
+					entry.Name,
+				)
+				return m, nil
+			}
 
 			m.deletePath = joinPath(m.path, entry.Name)
 			m.deleteIsDir = entry.IsDir
@@ -179,10 +191,6 @@ func (m model) View() tea.View {
 		return tea.NewView(m.localView())
 	}
 
-	if m.err != nil {
-		return tea.NewView(fmt.Sprintf("Error: %v\n", m.err))
-	}
-
 	if m.file != nil {
 		return m.fileView()
 	}
@@ -214,12 +222,22 @@ func (m model) View() tea.View {
 		}
 
 		s += fmt.Sprintf(
-			"%s%-4s %-40s %d\n",
+			"%s%-4s %-40s %d",
 			cursor,
 			kind,
 			entry.Name,
 			entry.Size,
 		)
+
+		if entry.Protected() {
+			s += "  (protected)"
+		}
+
+		s += "\n"
+	}
+
+	if m.err != nil {
+		s += fmt.Sprintf("\nError: %v\n", m.err)
 	}
 
 	s += "\n↑/↓: navigate   Enter: open"
@@ -278,13 +296,13 @@ func fsDelete(m *model, path string) error {
 		return fmt.Errorf("filesystem is read-only")
 	}
 
-	if err := m.fs.RemoveAll(path); err != nil {
-		return err
-	}
+	removeErr := m.fs.RemoveAll(path)
 
+	// Reload even after a failure: part of a directory tree may already
+	// have been removed.
 	entries, err := loadDirectory(m.fs, m.path)
 	if err != nil {
-		return err
+		return errors.Join(removeErr, err)
 	}
 
 	m.entries = entries
@@ -297,7 +315,7 @@ func fsDelete(m *model, path string) error {
 		m.cursor = 0
 	}
 
-	return nil
+	return removeErr
 }
 
 // updateDeviceConfirmation handles the confirmation required before writing to a device.
@@ -323,7 +341,7 @@ func (m model) updateDeleteConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "y", "enter":
+		case "y":
 			m.confirmDelete = false
 
 			if err := fsDelete(&m, m.deletePath); err != nil {
@@ -377,7 +395,7 @@ func (m model) deleteConfirmationView() string {
 	}
 
 	s += "This operation cannot be undone.\n\n"
-	s += "y/Enter: delete   n/Esc: cancel\n"
+	s += "y: delete   n/Esc: cancel\n"
 
 	return s
 }

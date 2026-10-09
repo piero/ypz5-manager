@@ -529,7 +529,7 @@ func TestReplaceFileLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if entry.Name() != "SONG.BIN" {
+	if entry.Name() != "song.bin" {
 		t.Fatalf(
 			"file name after replacement = %q, want %q",
 			entry.Name(),

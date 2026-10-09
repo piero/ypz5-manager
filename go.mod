@@ -2,7 +2,10 @@ module github.com/piero/ypz5
 
 go 1.27.1
 
-require charm.land/bubbletea/v2 v2.0.10
+require (
+	charm.land/bubbletea/v2 v2.0.10
+	golang.org/x/sys v0.46.0
+)
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
@@ -19,5 +22,4 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 )
