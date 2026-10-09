@@ -26,6 +26,9 @@ type model struct {
 	local        *localBrowser
 	localError   error
 	localConfirm bool
+	copyPlan     copyPlan
+
+	copy *copyJob
 
 	path    string
 	entries []fat32.DirectoryEntry
@@ -57,6 +60,10 @@ Directory
 	                            m.file = nil
 */
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.copy != nil {
+		return m.updateCopy(msg)
+	}
+
 	if m.confirmDevice {
 		return m.updateDeviceConfirmation(msg)
 	}
@@ -185,6 +192,10 @@ func (m model) View() tea.View {
 
 	if m.confirmDelete {
 		return tea.NewView(m.deleteConfirmationView())
+	}
+
+	if m.copy != nil {
+		return tea.NewView(m.copyView())
 	}
 
 	if m.local != nil {
@@ -443,6 +454,22 @@ func (m model) updateLocalBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			plan, err := planCopy(
+				m.local.selectedPaths(),
+				m.path,
+				m.fs.BytesPerCluster(),
+			)
+			if err != nil {
+				m.localError = err
+				return m, nil
+			}
+
+			if err := checkSpace(m.fs, plan); err != nil {
+				m.localError = err
+				return m, nil
+			}
+
+			m.copyPlan = plan
 			m.localConfirm = true
 		}
 	}
@@ -456,7 +483,11 @@ func (m model) updateLocalConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "enter":
 			m.localConfirm = false
-			return m, nil
+			m.local = nil
+			m.copy = &copyJob{plan: m.copyPlan}
+			m.copyPlan = copyPlan{}
+
+			return m, m.nextCopyStep()
 
 		case "n", "esc":
 			m.localConfirm = false
@@ -537,9 +568,20 @@ func (m model) localView() string {
 
 	if m.localConfirm {
 		s += "\n"
-		s += "Copy selected items to "
-		s += m.path
-		s += "?\n"
+		s += fmt.Sprintf(
+			"Copy %d files (%s) to %s?\n",
+			m.copyPlan.files,
+			formatSize(m.copyPlan.bytes),
+			m.path,
+		)
+
+		switch n := len(m.copyPlan.skipped); n {
+		case 0:
+		case 1:
+			s += "1 item will be skipped.\n"
+		default:
+			s += fmt.Sprintf("%d items will be skipped.\n", n)
+		}
 		s += "y/Enter: confirm   n/Esc: cancel\n"
 	}
 
