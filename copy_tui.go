@@ -11,6 +11,7 @@ import (
 // the screen updates between files and the copy can be cancelled.
 type copyJob struct {
 	plan      copyPlan
+	dest      string
 	next      int
 	copied    int
 	written   int64
@@ -114,7 +115,7 @@ func (m model) copyView() string {
 	s += "YPZ5 Manager\n\n"
 
 	if !job.done {
-		s += fmt.Sprintf("Copying to %s\n\n", m.path)
+		s += fmt.Sprintf("Copying to %s\n\n", job.dest)
 		s += fmt.Sprintf(
 			"%s  %d/%d  %s of %s\n",
 			progressBar(job.written, job.plan.bytes, 30),

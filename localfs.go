@@ -111,21 +111,6 @@ func (b *localBrowser) moveDown() {
 	}
 }
 
-/*
- // moveUp moves the local browser selection up by one entry.
- func (b *localBrowser) moveUp() {
-	if b.cursor > 0 {
-		b.cursor--
-	}
- }
- 
- // moveDown moves the local browser selection down by one entry.
- func (b *localBrowser) moveDown() {
-	if b.cursor < len(b.entries)-1 {
-		b.cursor++
-	}
- }
- */
 func (b *localBrowser) toggleSelection() {
 	entry := b.current()
 	if entry == nil {
@@ -180,32 +165,4 @@ func (b *localBrowser) selectedPaths() []string {
 	sort.Strings(paths)
 
 	return paths
-}
-
-// ensureVisible keeps the selected local entry inside the visible viewport.
-func (b *localBrowser) ensureVisible(height int) {
-	if height <= 0 {
-		return
-	}
-
-	if b.cursor < b.offset {
-		b.offset = b.cursor
-	}
-
-	if b.cursor >= b.offset+height {
-		b.offset = b.cursor - height + 1
-	}
-
-	if b.offset < 0 {
-		b.offset = 0
-	}
-
-	maxOffset := len(b.entries) - height
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-
-	if b.offset > maxOffset {
-		b.offset = maxOffset
-	}
 }

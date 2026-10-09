@@ -28,13 +28,24 @@ type model struct {
 	localConfirm bool
 	copyPlan     copyPlan
 
+	// dest is the device folder files are copied into; picker is open
+	// while the user chooses another one.
+	dest        string
+	picker      *destPicker
+	pickerError error
+
 	copy *copyJob
 
 	path    string
 	entries []fat32.DirectoryEntry
 	cursor  int
+	offset  int
 	err     error
 	file    *fat32.DirectoryEntry
+
+	// Terminal size, from tea.WindowSizeMsg; 0 until known.
+	width  int
+	height int
 }
 
 func (m model) Init() tea.Cmd {
@@ -60,6 +71,53 @@ Directory
 	                            m.file = nil
 */
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = size.Width
+		m.height = size.Height
+	}
+
+	next, cmd := m.update(msg)
+
+	updated := next.(model)
+	updated.syncScroll()
+
+	return updated, cmd
+}
+
+// syncScroll keeps the cursor of each list on screen after the cursor,
+// the list or the terminal size changed.
+func (m *model) syncScroll() {
+	m.offset = scrollOffset(m.cursor, m.offset, len(m.entries), m.browserRows())
+
+	if m.picker != nil {
+		m.picker.offset = scrollOffset(
+			m.picker.cursor,
+			m.picker.offset,
+			len(m.picker.entries),
+			m.pickerRows(),
+		)
+	}
+
+	if m.local != nil {
+		m.local.offset = scrollOffset(
+			m.local.cursor,
+			m.local.offset,
+			len(m.local.entries),
+			m.localRows(),
+		)
+	}
+}
+
+// pageSize is how far PgUp/PgDn move in a list showing rows entries.
+func pageSize(rows int) int {
+	if rows <= 1 {
+		return 10
+	}
+
+	return rows - 1
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.copy != nil {
 		return m.updateCopy(msg)
 	}
@@ -74,6 +132,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.localConfirm {
 		return m.updateLocalConfirmation(msg)
+	}
+
+	if m.picker != nil {
+		return m.updateDestPicker(msg)
 	}
 
 	if m.local != nil {
@@ -103,6 +165,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.local = browser
 			m.localError = nil
 			m.file = nil
+			m.dest = defaultDest(m.fs)
 
 		case "d":
 			if !m.writeEnabled || len(m.entries) == 0 {
@@ -132,6 +195,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.entries)-1 {
 				m.cursor++
 			}
+
+		case "pgup":
+			m.cursor = moveCursor(m.cursor, -pageSize(m.browserRows()), len(m.entries))
+
+		case "pgdown":
+			m.cursor = moveCursor(m.cursor, pageSize(m.browserRows()), len(m.entries))
+
+		case "home":
+			m.cursor = 0
+
+		case "end":
+			m.cursor = moveCursor(len(m.entries), 0, len(m.entries))
 
 		case "enter":
 			if len(m.entries) == 0 {
@@ -186,26 +261,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
+	if m.file != nil && m.copy == nil && m.local == nil &&
+		!m.confirmDevice && !m.confirmDelete {
+		return screen(m.fileView())
+	}
+
+	return screen(m.content())
+}
+
+// screen shows content full-screen, so long lists can be scrolled
+// instead of running past the bottom of the terminal.
+func screen(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+
+	return v
+}
+
+func (m model) content() string {
 	if m.confirmDevice {
-		return tea.NewView(m.deviceConfirmationView())
+		return m.deviceConfirmationView()
 	}
 
 	if m.confirmDelete {
-		return tea.NewView(m.deleteConfirmationView())
+		return m.deleteConfirmationView()
 	}
 
 	if m.copy != nil {
-		return tea.NewView(m.copyView())
+		return m.copyView()
+	}
+
+	if m.picker != nil {
+		return m.pickerView()
 	}
 
 	if m.local != nil {
-		return tea.NewView(m.localView())
+		return m.localView()
 	}
 
-	if m.file != nil {
-		return m.fileView()
-	}
+	return m.browserView()
+}
 
+func (m model) browserHeader() string {
 	var s string
 
 	s += "YPZ5 Manager\n\n"
@@ -219,7 +316,39 @@ func (m model) View() tea.View {
 
 	s += fmt.Sprintf("\nPath: %s\n\n", m.path)
 
-	for i, entry := range m.entries {
+	return s
+}
+
+func (m model) browserFooter() string {
+	var s string
+
+	if m.err != nil {
+		s += fmt.Sprintf("\nError: %v\n", m.err)
+	}
+
+	s += "\n↑/↓: navigate   PgUp/PgDn: page   Enter: open   Backspace/h: back"
+
+	if m.writeEnabled {
+		s += "   n: add   d: delete"
+	}
+
+	s += "   q: quit\n"
+
+	return s
+}
+
+// browserRows is how many device entries fit on screen.
+func (m model) browserRows() int {
+	return listRows(m.height, m.browserHeader(), m.browserFooter())
+}
+
+func (m model) browserView() string {
+	s := m.browserHeader()
+
+	start, end := visibleRange(m.offset, len(m.entries), m.browserRows())
+
+	for i := start; i < end; i++ {
+		entry := m.entries[i]
 		cursor := "  "
 
 		if i == m.cursor {
@@ -233,10 +362,11 @@ func (m model) View() tea.View {
 		}
 
 		s += fmt.Sprintf(
-			"%s%-4s %-40s %d",
+			"%s%-4s %-*s %d",
 			cursor,
 			kind,
-			entry.Name,
+			nameWidth,
+			truncateName(entry.Name, nameWidth),
 			entry.Size,
 		)
 
@@ -247,19 +377,10 @@ func (m model) View() tea.View {
 		s += "\n"
 	}
 
-	if m.err != nil {
-		s += fmt.Sprintf("\nError: %v\n", m.err)
-	}
+	s += positionLine(start, end, len(m.entries)) + "\n"
+	s += m.browserFooter()
 
-	s += "\n↑/↓: navigate   Enter: open"
-
-	if m.writeEnabled {
-		s += "   n: add   d: delete"
-	}
-
-	s += "   q: quit\n"
-
-	return tea.NewView(s)
+	return s
 }
 
 func loadDirectory(fs *fat32.Filesystem, path string) ([]fat32.DirectoryEntry, error) {
@@ -280,7 +401,7 @@ func parentPath(path string) string {
 	return path[:index]
 }
 
-func (m model) fileView() tea.View {
+func (m model) fileView() string {
 	entry := m.file
 
 	var s string
@@ -304,7 +425,7 @@ func (m model) fileView() tea.View {
 	s += fmt.Sprintf("Start cluster: %d\n", entry.StartCluster)
 	s += "\nBackspace/h: back   q: quit\n"
 
-	return tea.NewView(s)
+	return s
 }
 
 func fsDelete(m *model, path string) error {
@@ -436,6 +557,18 @@ func (m model) updateLocalBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.local.moveDown()
 			m.localError = nil
 
+		case "pgup":
+			m.local.cursor = moveCursor(m.local.cursor, -pageSize(m.localRows()), len(m.local.entries))
+
+		case "pgdown":
+			m.local.cursor = moveCursor(m.local.cursor, pageSize(m.localRows()), len(m.local.entries))
+
+		case "home":
+			m.local.cursor = 0
+
+		case "end":
+			m.local.cursor = moveCursor(len(m.local.entries), 0, len(m.local.entries))
+
 		case "space":
 			m.local.toggleSelection()
 			m.localError = nil
@@ -454,6 +587,15 @@ func (m model) updateLocalBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.localError = nil
 			}
 
+		case "t":
+			picker, err := newDestPicker(m.fs, m.dest)
+			if err != nil {
+				m.localError = err
+				return m, nil
+			}
+
+			m.picker = picker
+
 		case "c":
 			if len(m.local.selectedPaths()) == 0 {
 				return m, nil
@@ -461,7 +603,7 @@ func (m model) updateLocalBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			plan, err := planCopy(
 				m.local.selectedPaths(),
-				m.path,
+				m.dest,
 				m.fs.BytesPerCluster(),
 			)
 			if err != nil {
@@ -489,7 +631,7 @@ func (m model) updateLocalConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "y", "enter":
 			m.localConfirm = false
 			m.local = nil
-			m.copy = &copyJob{plan: m.copyPlan}
+			m.copy = &copyJob{plan: m.copyPlan, dest: m.dest}
 			m.copyPlan = copyPlan{}
 
 			return m, m.nextCopyStep()
@@ -502,6 +644,55 @@ func (m model) updateLocalConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) localHeader() string {
+	var s string
+
+	s += "Add files to YP-Z5\n\n"
+	s += fmt.Sprintf("Local path: %s\n", m.local.path)
+	s += fmt.Sprintf("Destination: %s   (t: change)\n\n", m.dest)
+
+	return s
+}
+
+func (m model) localFooter() string {
+	var s string
+
+	s += fmt.Sprintf(
+		"\nSelected: %d",
+		len(m.local.selectedPaths()),
+	)
+
+	s += "\n\n↑/↓: navigate   PgUp/PgDn: page   Space: select   Enter: open"
+	s += "\nBackspace/h: parent   t: change destination   c: copy   Esc: cancel\n"
+
+	if m.localConfirm {
+		s += "\n"
+		s += fmt.Sprintf(
+			"Copy %d files (%s) to %s?\n",
+			m.copyPlan.files,
+			formatSize(m.copyPlan.bytes),
+			m.dest,
+		)
+
+		switch n := len(m.copyPlan.skipped); n {
+		case 0:
+		case 1:
+			s += "1 item will be skipped.\n"
+		default:
+			s += fmt.Sprintf("%d items will be skipped.\n", n)
+		}
+
+		s += "y/Enter: confirm   n/Esc: cancel\n"
+	}
+
+	return s
+}
+
+// localRows is how many local entries fit on screen.
+func (m model) localRows() int {
+	return listRows(m.height, m.localHeader(), m.localFooter())
+}
+
 func (m model) localView() string {
 	if m.localError != nil {
 		return fmt.Sprintf(
@@ -510,23 +701,12 @@ func (m model) localView() string {
 		)
 	}
 
-	var s string
+	s := m.localHeader()
 
-	s += "Add files to YP-Z5\n\n"
-	s += fmt.Sprintf("Local path: %s\n", m.local.path)
-	s += fmt.Sprintf("Destination: %s\n\n", m.path)
+	start, end := visibleRange(m.local.offset, len(m.local.entries), m.localRows())
 
-	// s += fmt.Sprintf(
-	// 	"DEBUG cursor=%d selected=%d currentSelected=%v\n\n",
-	// 	m.local.cursor,
-	// 	len(m.local.selectedPaths()),
-	// 	func() bool {
-	// 		entry := m.local.current()
-	// 		return entry != nil && entry.selected
-	// 	}(),
-	// )
-
-	for i, entry := range m.local.entries {
+	for i := start; i < end; i++ {
+		entry := m.local.entries[i]
 		cursor := "  "
 
 		if i == m.local.cursor {
@@ -535,9 +715,6 @@ func (m model) localView() string {
 
 		selected := " "
 
-		// if m.local.selections[entry.path] {
-		// 	selected = "*"
-		// }
 		if entry.selected {
 			selected = "*"
 		}
@@ -549,11 +726,12 @@ func (m model) localView() string {
 		}
 
 		s += fmt.Sprintf(
-			"%s[%s] %-4s %-40s",
+			"%s[%s] %-4s %-*s",
 			cursor,
 			selected,
 			kind,
-			entry.name,
+			nameWidth,
+			truncateName(entry.name, nameWidth),
 		)
 
 		if !entry.isDir {
@@ -563,32 +741,8 @@ func (m model) localView() string {
 		s += "\n"
 	}
 
-	s += fmt.Sprintf(
-		"\nSelected: %d",
-		len(m.local.selectedPaths()),
-	)
-
-	s += "\n\n↑/↓: navigate   Space: select   Enter: open"
-	s += "\nBackspace/h: parent   c: copy   Esc: cancel\n"
-
-	if m.localConfirm {
-		s += "\n"
-		s += fmt.Sprintf(
-			"Copy %d files (%s) to %s?\n",
-			m.copyPlan.files,
-			formatSize(m.copyPlan.bytes),
-			m.path,
-		)
-
-		switch n := len(m.copyPlan.skipped); n {
-		case 0:
-		case 1:
-			s += "1 item will be skipped.\n"
-		default:
-			s += fmt.Sprintf("%d items will be skipped.\n", n)
-		}
-		s += "y/Enter: confirm   n/Esc: cancel\n"
-	}
+	s += positionLine(start, end, len(m.local.entries)) + "\n"
+	s += m.localFooter()
 
 	return s
 }
