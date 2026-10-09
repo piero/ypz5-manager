@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -125,23 +124,32 @@ func (m model) updateDestPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) pickerHeader() string {
+	p := devicePalette
+
 	var s string
 
-	s += "Choose destination on YP-Z5\n\n"
-	s += fmt.Sprintf("Folder: %s\n\n", m.picker.path)
+	s += p.titleBar("Choose where to copy") + "\n\n"
+	s += p.label("Folder", m.picker.path) + "\n\n"
 
 	return s
 }
 
 func (m model) pickerFooter() string {
+	p := devicePalette
+
 	var s string
 
 	if m.pickerError != nil {
-		s += fmt.Sprintf("\nError: %v\n", m.pickerError)
+		s += "\n" + errorLine(m.pickerError) + "\n"
 	}
 
-	s += "\n↑/↓: navigate   PgUp/PgDn: page   Enter: open   Backspace/h: back"
-	s += "\ns: copy into this folder   Esc: cancel\n"
+	s += "\n" + p.help(
+		"↑/↓", "navigate",
+		"PgUp/PgDn", "page",
+		"Enter", "open",
+		"Backspace/h", "back",
+	)
+	s += "\n" + p.help("s", "copy into this folder", "Esc", "cancel") + "\n"
 
 	return s
 }
@@ -151,26 +159,27 @@ func (m model) pickerRows() int {
 }
 
 func (m model) pickerView() string {
-	p := m.picker
+	p := devicePalette
+	picker := m.picker
 	s := m.pickerHeader()
 
-	if len(p.entries) == 0 {
-		s += "  (no folders)\n"
+	if len(picker.entries) == 0 {
+		s += dimStyle.render("  (no folders)") + "\n"
 	}
 
-	start, end := visibleRange(p.offset, len(p.entries), m.pickerRows())
+	start, end := visibleRange(picker.offset, len(picker.entries), m.pickerRows())
 
 	for i := start; i < end; i++ {
-		cursor := "  "
-
-		if i == p.cursor {
-			cursor = "> "
-		}
-
-		s += fmt.Sprintf("%sDIR  %s\n", cursor, truncateName(p.entries[i].Name, nameWidth))
+		s += p.row(
+			i == picker.cursor,
+			"",
+			"DIR ",
+			truncateName(picker.entries[i].Name, nameWidth),
+			"",
+		) + "\n"
 	}
 
-	s += positionLine(start, end, len(p.entries)) + "\n"
+	s += dimStyle.render(positionLine(start, end, len(picker.entries))) + "\n"
 	s += m.pickerFooter()
 
 	return s

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -108,14 +109,14 @@ func (m model) updateCopy(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) copyView() string {
+	p := devicePalette
 	job := m.copy
 
 	var s string
 
-	s += "YPZ5 Manager\n\n"
-
 	if !job.done {
-		s += fmt.Sprintf("Copying to %s\n\n", job.dest)
+		s += p.titleBar("Copying from Mac") + "\n\n"
+		s += p.label("Copying to", job.dest) + "\n\n"
 		s += fmt.Sprintf(
 			"%s  %d/%d  %s of %s\n",
 			progressBar(job.written, job.plan.bytes, 30),
@@ -126,25 +127,27 @@ func (m model) copyView() string {
 		)
 
 		if job.next < len(job.plan.ops) {
-			s += fmt.Sprintf("\n%s\n", path.Base(job.plan.ops[job.next].dest))
+			s += "\n" + dimStyle.render(path.Base(job.plan.ops[job.next].dest)) + "\n"
 		}
 
 		if job.cancelled {
-			s += "\nCancelling after the current file...\n"
+			s += "\n" + warningStyle.render("Cancelling after the current file...") + "\n"
 		} else {
-			s += "\nEsc: cancel after the current file\n"
+			s += "\n" + p.help("Esc", "cancel after the current file") + "\n"
 		}
 
 		return s
 	}
 
+	s += p.titleBar("Copy to "+job.dest) + "\n\n"
+
 	switch {
 	case job.cancelled:
-		s += "Copy cancelled.\n\n"
+		s += warningStyle.render("Copy cancelled.") + "\n\n"
 	case len(job.errors) > 0:
-		s += "Copy finished with errors.\n\n"
+		s += errorStyle.render("Copy finished with errors.") + "\n\n"
 	default:
-		s += "Copy finished.\n\n"
+		s += successStyle.render("Copy finished.") + "\n\n"
 	}
 
 	s += fmt.Sprintf(
@@ -153,27 +156,27 @@ func (m model) copyView() string {
 		formatSize(job.written),
 	)
 
-	s += listSection("Skipped", job.skipped)
-	s += listSection("Errors", job.errors)
+	s += listSection(warningStyle, "Skipped", job.skipped)
+	s += listSection(errorStyle, "Errors", job.errors)
 
-	s += "\nEnter: back\n"
+	s += "\n" + p.help("Enter", "back") + "\n"
 
 	return s
 }
 
 // listSection renders a titled list, showing at most 10 items.
-func listSection(title string, items []string) string {
+func listSection(titleStyle style, title string, items []string) string {
 	if len(items) == 0 {
 		return ""
 	}
 
 	const limit = 10
 
-	s := fmt.Sprintf("\n%s (%d):\n", title, len(items))
+	s := "\n" + titleStyle.renderf("%s (%d):", title, len(items)) + "\n"
 
 	for i, item := range items {
 		if i == limit {
-			s += fmt.Sprintf("  ... and %d more\n", len(items)-limit)
+			s += dimStyle.renderf("  ... and %d more", len(items)-limit) + "\n"
 			break
 		}
 
@@ -190,15 +193,8 @@ func progressBar(done, total int64, width int) string {
 		filled = int(done * int64(width) / total)
 	}
 
-	bar := make([]rune, width)
-
-	for i := range bar {
-		if i < filled {
-			bar[i] = '█'
-		} else {
-			bar[i] = '░'
-		}
-	}
-
-	return "[" + string(bar) + "]"
+	return "[" +
+		devicePalette.accent.render(strings.Repeat("█", filled)) +
+		dimStyle.render(strings.Repeat("░", width-filled)) +
+		"]"
 }

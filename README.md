@@ -17,16 +17,23 @@ go run . --device PATH [--write]     # a device node, e.g. /dev/rdisk4
 Either a whole disk (with its MBR) or a single partition works: the FAT32
 partition is found automatically.
 
+Screens are color-coded by the filesystem they operate on: **blue/cyan**
+for the YP-Z5 (device or image), **amber/orange** for the Mac's local
+files. Each screen also starts with a ` YP-Z5 ` or ` MAC ` tag. Set
+`NO_COLOR=1` to disable colors.
+
 ### Keys
 
 | Screen          | Keys                                                                 |
 |-----------------|----------------------------------------------------------------------|
-| Browser         | `↑`/`↓` or `k`/`j` move, `Enter` open, `Backspace`/`h` up, `q` quit   |
+| Browser         | `↑`/`↓` or `k`/`j` move, `PgUp`/`PgDn`/`Home`/`End` scroll, `Enter` open, `Backspace`/`h` up, `q` quit |
 | Browser (write) | `n` add files from the Mac, `d` delete (confirm with `y`)            |
-| Add files       | `Space` select, `Enter` open folder, `Backspace`/`h` up, `c` copy, `Esc` back |
+| Add files       | `↑`/`↓`, `PgUp`/`PgDn`/`Home`/`End` as above, `Space` select, `Enter` open folder, `Backspace`/`h` up, `t` change destination, `c` copy, `Esc` back |
+| Destination     | Browse device folders as above, `s` copy into the current folder, `Esc` cancel |
 | Copying         | `Esc` cancels after the current file                                 |
 
-Files are copied into the folder currently open in the browser.
+Files are copied into `/Music` by default; press `t` on the add-files
+screen to pick another device folder.
 `.DS_Store` and `._*` files are never copied, existing files are skipped
 (never overwritten), and existing folders are merged into. Free space is
 checked before anything is written.

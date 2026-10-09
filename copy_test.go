@@ -350,7 +350,7 @@ func TestCopyToChosenDestination(t *testing.T) {
 		t.Fatalf("after choosing: picker open = %v, dest = %q", m.picker != nil, m.dest)
 	}
 
-	if view := m.localView(); !strings.Contains(view, "Destination: /Recordings") {
+	if view := m.localView(); !strings.Contains(view, "Copy to (YP-Z5): /Recordings") {
 		t.Fatalf("local view does not show the destination:\n%s", view)
 	}
 

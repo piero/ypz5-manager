@@ -303,36 +303,42 @@ func (m model) content() string {
 }
 
 func (m model) browserHeader() string {
+	p := devicePalette
+
 	var s string
 
-	s += "YPZ5 Manager\n\n"
-	s += fmt.Sprintf("Source: %s\n", m.source)
-
-	if m.writeEnabled {
-		s += "Mode:   READ/WRITE\n"
-	} else {
-		s += "Mode:   READ-ONLY\n"
-	}
-
-	s += fmt.Sprintf("\nPath: %s\n\n", m.path)
+	s += p.titleBar("File manager") + "  " + modeTag(m.writeEnabled) + "\n\n"
+	s += p.label("Source", m.source) + "\n"
+	s += p.label("Path", m.path) + "\n\n"
 
 	return s
 }
 
 func (m model) browserFooter() string {
+	p := devicePalette
+
 	var s string
 
 	if m.err != nil {
-		s += fmt.Sprintf("\nError: %v\n", m.err)
+		s += "\n" + errorLine(m.err) + "\n"
 	}
 
-	s += "\n↑/↓: navigate   PgUp/PgDn: page   Enter: open   Backspace/h: back"
+	s += "\n" + p.help(
+		"↑/↓", "navigate",
+		"PgUp/PgDn", "page",
+		"Enter", "open",
+		"Backspace/h", "back",
+	)
+
+	actions := []string{}
 
 	if m.writeEnabled {
-		s += "   n: add   d: delete"
+		actions = append(actions, "n", "add from Mac", "d", "delete")
 	}
 
-	s += "   q: quit\n"
+	actions = append(actions, "q", "quit")
+
+	s += "\n" + p.help(actions...) + "\n"
 
 	return s
 }
@@ -343,41 +349,38 @@ func (m model) browserRows() int {
 }
 
 func (m model) browserView() string {
+	p := devicePalette
 	s := m.browserHeader()
 
 	start, end := visibleRange(m.offset, len(m.entries), m.browserRows())
 
 	for i := start; i < end; i++ {
 		entry := m.entries[i]
-		cursor := "  "
-
-		if i == m.cursor {
-			cursor = "> "
-		}
 
 		kind := "FILE"
+		size := formatSize(int64(entry.Size))
 
 		if entry.IsDir {
 			kind = "DIR "
+			size = ""
 		}
 
-		s += fmt.Sprintf(
-			"%s%-4s %-*s %d",
-			cursor,
-			kind,
-			nameWidth,
-			truncateName(entry.Name, nameWidth),
-			entry.Size,
-		)
+		suffix := fmt.Sprintf(" %10s", size)
 
 		if entry.Protected() {
-			s += "  (protected)"
+			suffix += "  (protected)"
 		}
 
-		s += "\n"
+		s += p.row(
+			i == m.cursor,
+			"",
+			kind,
+			fmt.Sprintf("%-*s", nameWidth, truncateName(entry.Name, nameWidth)),
+			suffix,
+		) + "\n"
 	}
 
-	s += positionLine(start, end, len(m.entries)) + "\n"
+	s += dimStyle.render(positionLine(start, end, len(m.entries))) + "\n"
 	s += m.browserFooter()
 
 	return s
@@ -402,28 +405,24 @@ func parentPath(path string) string {
 }
 
 func (m model) fileView() string {
+	p := devicePalette
 	entry := m.file
 
 	var s string
 
-	s += "YPZ5 Manager\n\n"
-	s += fmt.Sprintf("Storage: %s\n", m.source)
-	mode := "read-only"
-	if m.writeEnabled {
-		mode = "READ/WRITE"
-	}
-	s += fmt.Sprintf("Mode:    %s\n", mode)
-	s += fmt.Sprintf("Path: %s\n\n", m.path)
-	s += fmt.Sprintf("Name:          %s\n", entry.Name)
-	s += "Type:          File\n"
-	s += fmt.Sprintf("Size:          %d bytes\n", entry.Size)
+	s += p.titleBar("File") + "  " + modeTag(m.writeEnabled) + "\n\n"
+	s += p.label("Source       ", m.source) + "\n"
+	s += p.label("Path         ", m.path) + "\n\n"
+	s += p.label("Name         ", entry.Name) + "\n"
+	s += p.label("8.3 name     ", entry.ShortName) + "\n"
+	s += p.label("Size         ", fmt.Sprintf("%d bytes (%s)", entry.Size, formatSize(int64(entry.Size)))) + "\n"
 
 	if !entry.Modified.IsZero() {
-		s += fmt.Sprintf("Modified:      %s\n", entry.Modified.Format("2006-01-02 15:04"))
+		s += p.label("Modified     ", entry.Modified.Format("2006-01-02 15:04")) + "\n"
 	}
 
-	s += fmt.Sprintf("Start cluster: %d\n", entry.StartCluster)
-	s += "\nBackspace/h: back   q: quit\n"
+	s += p.label("Start cluster", fmt.Sprint(entry.StartCluster)) + "\n"
+	s += "\n" + p.help("Backspace/h", "back", "q", "quit") + "\n"
 
 	return s
 }
@@ -502,37 +501,38 @@ func (m model) updateDeleteConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // deviceConfirmationView displays the safety warning shown before enabling device writes.
 func (m model) deviceConfirmationView() string {
+	p := devicePalette
+
 	var s string
 
-	s += "YPZ5 Manager\n\n"
-	s += "WARNING\n\n"
-	s += "You are about to open a physical device for writing.\n\n"
-	s += fmt.Sprintf("Device: %s\n\n", m.source)
+	s += dangerBar.render(" WARNING ") + " " + p.accent.render("Open device for writing") + "\n\n"
+	s += p.label("Device", m.source) + "\n\n"
 	s += "Writing to the device can corrupt its filesystem or\n"
 	s += "destroy data if the device is disconnected during a write.\n\n"
-	s += "Continue and enable READ/WRITE mode?\n\n"
-	s += "y/Enter: continue   n/Esc/q: quit\n"
+	s += warningStyle.render("Continue and enable READ/WRITE mode?") + "\n\n"
+	s += p.help("y/Enter", "continue", "n/Esc/q", "quit") + "\n"
 
 	return s
 }
 
 // deleteConfirmationView displays the appropriate deletion warning.
 func (m model) deleteConfirmationView() string {
+	p := devicePalette
+
 	var s string
 
-	s += "YPZ5 Manager\n\n"
-	s += "WARNING\n\n"
-	s += fmt.Sprintf("Delete: %s\n\n", m.deletePath)
+	s += dangerBar.render(" DELETE ") + " " + p.accent.render("from the YP-Z5") + "\n\n"
+	s += p.label("Delete", m.deletePath) + "\n\n"
 
 	if m.deleteIsDir {
-		s += "This will recursively delete the directory and\n"
-		s += "ALL of its contents.\n\n"
+		s += warningStyle.render("This will recursively delete the directory and") + "\n"
+		s += warningStyle.render("ALL of its contents.") + "\n\n"
 	} else {
 		s += "This will permanently delete the file.\n\n"
 	}
 
-	s += "This operation cannot be undone.\n\n"
-	s += "y: delete   n/Esc: cancel\n"
+	s += errorStyle.render("This operation cannot be undone.") + "\n\n"
+	s += p.help("y", "delete", "n/Esc", "cancel") + "\n"
 
 	return s
 }
@@ -645,44 +645,55 @@ func (m model) updateLocalConfirmation(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) localHeader() string {
+	p := localPalette
+
 	var s string
 
-	s += "Add files to YP-Z5\n\n"
-	s += fmt.Sprintf("Local path: %s\n", m.local.path)
-	s += fmt.Sprintf("Destination: %s   (t: change)\n\n", m.dest)
+	s += p.titleBar("Add files from this Mac") + "\n\n"
+	s += p.label("Local folder   ", m.local.path) + "\n"
+	s += devicePalette.label("Copy to (YP-Z5)", m.dest) + "  " + dimStyle.render("(t: change)") + "\n\n"
 
 	return s
 }
 
 func (m model) localFooter() string {
+	p := localPalette
+
 	var s string
 
-	s += fmt.Sprintf(
-		"\nSelected: %d",
-		len(m.local.selectedPaths()),
-	)
+	s += "\n" + p.label("Selected", fmt.Sprint(len(m.local.selectedPaths())))
 
-	s += "\n\n↑/↓: navigate   PgUp/PgDn: page   Space: select   Enter: open"
-	s += "\nBackspace/h: parent   t: change destination   c: copy   Esc: cancel\n"
+	s += "\n\n" + p.help(
+		"↑/↓", "navigate",
+		"PgUp/PgDn", "page",
+		"Space", "select",
+		"Enter", "open",
+	)
+	s += "\n" + p.help(
+		"Backspace/h", "parent",
+		"t", "change destination",
+		"c", "copy",
+		"Esc", "cancel",
+	) + "\n"
 
 	if m.localConfirm {
 		s += "\n"
-		s += fmt.Sprintf(
-			"Copy %d files (%s) to %s?\n",
+		s += warningStyle.renderf(
+			"Copy %d files (%s) to %s?",
 			m.copyPlan.files,
 			formatSize(m.copyPlan.bytes),
 			m.dest,
-		)
+		) + "\n"
 
 		switch n := len(m.copyPlan.skipped); n {
 		case 0:
 		case 1:
-			s += "1 item will be skipped.\n"
+			s += dimStyle.render("1 item will be skipped.") + "\n"
 		default:
-			s += fmt.Sprintf("%d items will be skipped.\n", n)
+			s += dimStyle.renderf("%d items will be skipped.", n) + "\n"
 		}
 
-		s += "y/Enter: confirm   n/Esc: cancel\n"
+		s += p.help("y/Enter", "confirm", "n/Esc", "cancel") + "\n"
 	}
 
 	return s
@@ -694,11 +705,12 @@ func (m model) localRows() int {
 }
 
 func (m model) localView() string {
+	p := localPalette
+
 	if m.localError != nil {
-		return fmt.Sprintf(
-			"Add files\n\nError: %v\n\nEsc: back",
-			m.localError,
-		)
+		return p.titleBar("Add files from this Mac") + "\n\n" +
+			errorLine(m.localError) + "\n\n" +
+			p.help("Esc", "back")
 	}
 
 	s := m.localHeader()
@@ -707,41 +719,35 @@ func (m model) localView() string {
 
 	for i := start; i < end; i++ {
 		entry := m.local.entries[i]
-		cursor := "  "
+		isCursor := i == m.local.cursor
 
-		if i == m.local.cursor {
-			cursor = "> "
-		}
-
-		selected := " "
-
+		mark := " "
 		if entry.selected {
-			selected = "*"
+			mark = "*"
+
+			if !isCursor {
+				mark = p.marked.render(mark)
+			}
 		}
 
 		kind := "FILE"
+		size := formatSize(entry.size)
 
 		if entry.isDir {
 			kind = "DIR "
+			size = ""
 		}
 
-		s += fmt.Sprintf(
-			"%s[%s] %-4s %-*s",
-			cursor,
-			selected,
+		s += p.row(
+			isCursor,
+			"["+mark+"] ",
 			kind,
-			nameWidth,
-			truncateName(entry.name, nameWidth),
-		)
-
-		if !entry.isDir {
-			s += fmt.Sprintf(" %d", entry.size)
-		}
-
-		s += "\n"
+			fmt.Sprintf("%-*s", nameWidth, truncateName(entry.name, nameWidth)),
+			fmt.Sprintf(" %10s", size),
+		) + "\n"
 	}
 
-	s += positionLine(start, end, len(m.local.entries)) + "\n"
+	s += dimStyle.render(positionLine(start, end, len(m.local.entries))) + "\n"
 	s += m.localFooter()
 
 	return s
