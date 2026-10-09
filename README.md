@@ -4,6 +4,127 @@ TUI for managing files on FAT32 partition,
 initially targeted at the Samsung YP-Z5 player.
 
 
+## Running the TUI
+
+The tool works on either a disk image or the real device. It opens
+read-only unless `--write` is given.
+
+```sh
+go run . --image PATH  [--write]     # a disk image file
+go run . --device PATH [--write]     # a device node, e.g. /dev/rdisk4
+```
+
+Either a whole disk (with its MBR) or a single partition works: the FAT32
+partition is found automatically.
+
+### Keys
+
+| Screen          | Keys                                                                 |
+|-----------------|----------------------------------------------------------------------|
+| Browser         | `↑`/`↓` or `k`/`j` move, `Enter` open, `Backspace`/`h` up, `q` quit   |
+| Browser (write) | `n` add files from the Mac, `d` delete (confirm with `y`)            |
+| Add files       | `Space` select, `Enter` open folder, `Backspace`/`h` up, `c` copy, `Esc` back |
+| Copying         | `Esc` cancels after the current file                                 |
+
+Files are copied into the folder currently open in the browser.
+`.DS_Store` and `._*` files are never copied, existing files are skipped
+(never overwritten), and existing folders are merged into. Free space is
+checked before anything is written.
+
+Entries marked `(protected)` (read-only or system, such as `System`,
+`DevIcon.fil` and `DevLogo.fil`) cannot be deleted.
+
+### On a disk image
+
+Reading is always safe:
+
+```sh
+go run . --image images/yp-z5a-full-20261009.img
+```
+
+To try writing, use a copy so the pristine image is never modified
+(`cp -c` makes an instant APFS clone):
+
+```sh
+cp -c images/yp-z5a-full-20261009.img /tmp/scratch.img
+chmod u+w /tmp/scratch.img
+go run . --image /tmp/scratch.img --write
+```
+
+Check the result afterwards:
+
+```sh
+go run ./cmd/inspect -path /Music /tmp/scratch.img
+```
+
+and with macOS's own checker. `fsck_msdos` reads a bare partition
+directly, but a full disk image (with its MBR) must be attached first,
+without mounting it:
+
+```sh
+hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage /tmp/scratch.img
+# prints e.g. /dev/disk7 and /dev/disk7s1
+fsck_msdos -n /dev/disk7s1
+hdiutil detach /dev/disk7
+```
+
+### On the real device
+
+Before writing to the player, make sure a recent backup image exists
+(see [Creating an image from the device](#creating-an-image-from-the-device)).
+
+1. Connect the player and find its disk (about 2.0 GB, named `YP-Z5`):
+
+   ```sh
+   diskutil list
+   ```
+
+   The examples below use `disk4`. **Check the number every time**: it
+   can change between connections.
+
+2. Unmount it. macOS mounts the player automatically, and the tool
+   refuses to write while any part of the disk is mounted, because two
+   writers would corrupt the filesystem:
+
+   ```sh
+   diskutil unmountDisk /dev/disk4
+   ```
+
+3. Run the tool. Device nodes need `sudo`; use the raw node `rdisk`,
+   which is much faster:
+
+   ```sh
+   go build -o ypz5 .
+   sudo ./ypz5 --device /dev/rdisk4            # read-only
+   sudo ./ypz5 --device /dev/rdisk4 --write    # read/write, asks to confirm
+   ```
+
+   Every operation is flushed to the device when it finishes. Don't
+   unplug the player while a copy or delete is running; if it happens,
+   the worst case is lost free space (clusters still marked in use), not
+   a corrupted filesystem.
+
+4. Optionally check the filesystem, then eject:
+
+   ```sh
+   sudo fsck_msdos -n /dev/rdisk4s1
+   sudo go run ./cmd/inspect -path /Music /dev/rdisk4
+   diskutil eject /dev/disk4
+   ```
+
+5. Unplug the player and let it rebuild its library from `Music`.
+
+### Restoring a backup
+
+If anything goes wrong, write the backup image back to the device. This
+overwrites the whole disk: double-check the disk number first.
+
+```sh
+diskutil unmountDisk /dev/disk4
+sudo dd if=images/yp-z5a-full-20261009.img of=/dev/rdisk4 bs=1m status=progress
+diskutil eject /dev/disk4
+```
+
 ## Application structure
 
 ```
@@ -87,12 +208,8 @@ To verify it later:
 shasum -a 256 -c images/yp-z5a-full-20261009.img.sha256
 ```
 
-To experiment with the TUI in read/write mode, work on a copy:
-
-```sh
-cp -c images/yp-z5a-full-20261009.img /tmp/scratch.img && chmod u+w /tmp/scratch.img
-go run . --image /tmp/scratch.img --write
-```
+To experiment with the TUI in read/write mode, work on a copy (see
+[On a disk image](#on-a-disk-image)).
 
 
 ## Running the tests
