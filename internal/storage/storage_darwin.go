@@ -7,23 +7,47 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fullSync flushes f all the way to the medium. On macOS fsync only
-// hands data to the drive, which may still cache it; F_FULLFSYNC asks
-// the drive to flush too. Raw devices may not support it, in which case
-// a plain fsync is used.
+// dkiocSynchronizeCache is DKIOCSYNCHRONIZECACHE, _IO('d', 22) from
+// <sys/disk.h>: it asks a disk to flush its write cache.
+const dkiocSynchronizeCache = 0x20006416
+
+// fullSync flushes f all the way to the medium.
+//
+// For a raw device (/dev/rdiskN) writes bypass the buffer cache, so only
+// the drive's own cache needs flushing, which DKIOCSYNCHRONIZECACHE does;
+// fsync on a character device fails with ENOTTY.
+//
+// For a regular file fsync only hands data to the drive, which may still
+// cache it; F_FULLFSYNC asks the drive to flush too, falling back to a
+// plain fsync where it is unsupported.
 func fullSync(f *os.File) error {
-	_, err := unix.FcntlInt(f.Fd(), unix.F_FULLFSYNC, 0)
-	if err == nil {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	if info.Mode()&os.ModeCharDevice != 0 {
+		err := unix.IoctlSetInt(int(f.Fd()), dkiocSynchronizeCache, 0)
+		if err == nil || isUnsupported(err) {
+			return nil
+		}
+
+		return &os.PathError{Op: "sync", Path: f.Name(), Err: err}
+	}
+
+	if _, err := unix.FcntlInt(f.Fd(), unix.F_FULLFSYNC, 0); err == nil {
 		return nil
+	} else if !isUnsupported(err) {
+		return err
 	}
 
-	if errors.Is(err, unix.ENOTSUP) ||
+	return f.Sync()
+}
+
+func isUnsupported(err error) bool {
+	return errors.Is(err, unix.ENOTSUP) ||
 		errors.Is(err, unix.ENOTTY) ||
-		errors.Is(err, unix.EINVAL) {
-		return f.Sync()
-	}
-
-	return err
+		errors.Is(err, unix.EINVAL)
 }
 
 // mountedDevices returns the device nodes of all mounted filesystems,
