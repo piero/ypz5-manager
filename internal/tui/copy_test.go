@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/piero/ypz5/internal/testimage"
-	"github.com/piero/ypz5/internal/transfer"
+	"github.com/piero/ypz5-manager/internal/testimage"
+	"github.com/piero/ypz5-manager/internal/transfer"
 )
 
 func TestCopyViews(t *testing.T) {

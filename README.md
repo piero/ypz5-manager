@@ -2,7 +2,7 @@
   <img src="assets/yp-z5a.png" alt="Samsung YP-Z5A" width="160">
 </p>
 
-<h1 align="center">ypz5</h1>
+<h1 align="center">ypz5-manager</h1>
 
 <p align="center">
   A terminal file manager for the <b>Samsung YP-Z5</b> MP3 player<br>
@@ -11,10 +11,15 @@
 
 ---
 
-The YP-Z5 shows up on a Mac as a plain FAT32 disk, but Finder litters it
+I wanted to recover an old Samsung YP-Z5A player, which is no longer supported, also considering that I mostly work with MacOS nowadays.
+
+Unfortunately, although the YP-Z5 shows up on a Mac as a plain FAT32 disk, Finder litters it
 with `.DS_Store` and `._*` files and gives no control over what is written.
-`ypz5` talks to the filesystem directly: browse the player, copy music
-from your Mac, and delete files, all from a keyboard-driven TUI.
+
+Instead, this simple TUI file manager` talks to the filesystem directly. You can browse the files on the player device, copy music
+from your Mac, and delete files from the player.
+
+Incidentally, the code that handles the FAT32 filesystem (the `fat32` package) is generic enough to handle other FAT32 devices: however __it has only been tested on the Samsung YP-Z5A__, so use it at your own risk.
 
 ## Features
 
@@ -36,20 +41,20 @@ from your Mac, and delete files, all from a keyboard-driven TUI.
 Requires [Go](https://go.dev/dl/) 1.27 or later.
 
 ```sh
-go install github.com/piero/ypz5@latest
+go install github.com/piero/ypz5-manager@latest
 ```
 
 or build from a checkout:
 
 ```sh
-go build -o ypz5 .
+go build -o ypz5-manager .
 ```
 
 ## Usage
 
 ```sh
-ypz5 --image PATH  [--write]     # a disk image file
-ypz5 --device PATH [--write]     # a device node, e.g. /dev/rdisk4
+ypz5-manager --image PATH  [--write]     # a disk image file
+ypz5-manager --device PATH [--write]     # a device node, e.g. /dev/rdisk4
 ```
 
 Screens are color-coded by the filesystem they operate on:
@@ -84,19 +89,19 @@ Entries marked `(protected)` (read-only or system, such as `System`,
    The examples below use `disk4`. **Check the number every time**: it
    can change between connections.
 
-2. Unmount it. macOS mounts the player automatically, and `ypz5` refuses
+2. Unmount it. macOS mounts the player automatically, and `ypz5-manager` refuses
    to write while any part of the disk is mounted:
 
    ```sh
    diskutil unmountDisk /dev/disk4
    ```
 
-3. Run `ypz5`. Device nodes need `sudo`; the raw node `rdisk` is much
+3. Run `ypz5-manager`. Device nodes need `sudo`; the raw node `rdisk` is much
    faster:
 
    ```sh
-   sudo ypz5 --device /dev/rdisk4            # read-only
-   sudo ypz5 --device /dev/rdisk4 --write    # read/write, asks to confirm
+   sudo ypz5-manager --device /dev/rdisk4            # read-only
+   sudo ypz5-manager --device /dev/rdisk4 --write    # read/write, asks to confirm
    ```
 
    Every operation is flushed to the device when it finishes. Don't

@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/piero/ypz5/fat32"
+	"github.com/piero/ypz5-manager/fat32"
 )
 
 // maxFAT32FileSize is the largest file FAT32 can store.

@@ -7,7 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/piero/ypz5/internal/transfer"
+	"github.com/piero/ypz5-manager/internal/transfer"
 )
 
 // copyJob tracks a running copy. Each step runs as its own command, so

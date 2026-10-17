@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/piero/ypz5/fat32"
+	"github.com/piero/ypz5-manager/fat32"
 )
 
 // defaultDestination is where files are copied unless the user picks

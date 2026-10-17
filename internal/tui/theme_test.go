@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/piero/ypz5/fat32"
+	"github.com/piero/ypz5-manager/fat32"
 )
 
 // TestMain disables colors so tests can match plain text; tests that

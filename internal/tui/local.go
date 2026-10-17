@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/piero/ypz5/internal/transfer"
+	"github.com/piero/ypz5-manager/internal/transfer"
 )
 
 // updateLocalBrowser handles navigation and selection in the local filesystem browser.

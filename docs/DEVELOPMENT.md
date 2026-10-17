@@ -10,7 +10,7 @@
 
 ```sh
 go run . --image PATH [--write]
-go build -o ypz5 .
+go build -o ypz5-manager .
 ```
 
 See [TECHNICAL.md](TECHNICAL.md) for how the code is organized.

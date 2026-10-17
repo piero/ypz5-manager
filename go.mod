@@ -1,4 +1,4 @@
-module github.com/piero/ypz5
+module github.com/piero/ypz5-manager
 
 go 1.27.1
 

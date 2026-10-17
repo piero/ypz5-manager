@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/piero/ypz5/fat32"
-	"github.com/piero/ypz5/internal/transfer"
+	"github.com/piero/ypz5-manager/fat32"
+	"github.com/piero/ypz5-manager/internal/transfer"
 )
 
 // updateBrowser handles keys in the YP-Z5 file browser.

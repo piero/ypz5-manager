@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/piero/ypz5/fat32"
-	"github.com/piero/ypz5/internal/storage"
+	"github.com/piero/ypz5-manager/fat32"
+	"github.com/piero/ypz5-manager/internal/storage"
 )
 
 // Open opens a writable clone of the image through the same

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/piero/ypz5/internal/testimage"
+	"github.com/piero/ypz5-manager/internal/testimage"
 )
 
 func TestPlanCopySkipsMacOSMetadata(t *testing.T) {

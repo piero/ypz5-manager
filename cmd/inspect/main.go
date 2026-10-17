@@ -11,7 +11,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/piero/ypz5/fat32"
+	"github.com/piero/ypz5-manager/fat32"
 )
 
 func main() {

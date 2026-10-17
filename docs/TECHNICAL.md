@@ -1,6 +1,6 @@
 # Technical overview
 
-`ypz5` reads and writes the FAT32 filesystem directly, through its own
+`ypz5-manager` reads and writes the FAT32 filesystem directly, through its own
 FAT32 implementation, instead of going through the operating system's
 driver. This gives full control over what is written to the device, and
 lets the same code run against a disk image or a raw device node.
@@ -121,5 +121,5 @@ Additional guards:
 
 The player exposes a single disk of about 2.0 GB with an MBR; the FAT32
 partition starts at sector 32. After files are added, the player rebuilds
-its music library from the `Music` folder on its own, so `ypz5` only needs
+its music library from the `Music` folder on its own, so `ypz5-manager` only needs
 to place files there.

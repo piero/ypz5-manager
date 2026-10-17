@@ -1,4 +1,4 @@
-// Command ypz5 is a file manager for the FAT32 filesystem of the Samsung
+// Command ypz5-manager is a file manager for the FAT32 filesystem of the Samsung
 // YP-Z5 MP3 player, working on the device or on a disk image.
 package main
 
@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/piero/ypz5/fat32"
-	"github.com/piero/ypz5/internal/storage"
-	"github.com/piero/ypz5/internal/tui"
+	"github.com/piero/ypz5-manager/fat32"
+	"github.com/piero/ypz5-manager/internal/storage"
+	"github.com/piero/ypz5-manager/internal/tui"
 )
 
 func main() {

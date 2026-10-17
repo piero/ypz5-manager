@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/piero/ypz5/fat32"
+	"github.com/piero/ypz5-manager/fat32"
 )
 
 // Storage is a disk image or device holding a FAT32 filesystem. Reads
