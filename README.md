@@ -142,3 +142,7 @@ diskutil eject /dev/disk4
 This is an unofficial project, not affiliated with or endorsed by
 Samsung. Writing to a device's filesystem always carries some risk: keep a
 backup.
+
+## License
+
+Released under the [MIT License](LICENSE).
