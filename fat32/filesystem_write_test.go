@@ -2727,7 +2727,7 @@ func TestWriteUnicodeLongFilename(t *testing.T) {
 		t.Fatalf("write MUSIC directory: %v", err)
 	}
 
-	name := "Cartoni animati – è più bello 🎵.mp3"
+	name := "Canzone finta – è più bella 🎵.mp3"
 	content := []byte("hello")
 
 	if err := fs.WriteFile(

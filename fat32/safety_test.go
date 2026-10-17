@@ -14,8 +14,8 @@ func TestGenerateShortNameUsesLastDotAndSanitizes(t *testing.T) {
 		name string
 		want string
 	}{
-		{"Mr. Blue Sky.mp3", "MRBLUE~1.MP3"},
-		{"04 - Running Free.mp3", "04-RUN~1.MP3"},
+		{"Mr. Fake Song.mp3", "MRFAKE~1.MP3"},
+		{"04 - Rolling Demo.mp3", "04-ROL~1.MP3"},
 		{"a+b,c;d=e.mp3", "A_B_C_~1.MP3"},
 		{".DS_Store", "DS_STO~1"},
 		{"Città.mp3", "CITT_~1.MP3"},

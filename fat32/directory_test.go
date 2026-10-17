@@ -648,9 +648,9 @@ func TestGenerateShortName(t *testing.T) {
 			want: "THISIS~1.TXT",
 		},
 		{
-			name: "Cartoni animati",
+			name: "Morning playlist",
 			n:    1,
-			want: "CARTON~1",
+			want: "MORNIN~1",
 		},
 		{
 			name: "Some file.mp3",
@@ -1608,7 +1608,7 @@ func TestCreateDirectoryRecord(t *testing.T) {
 	}
 
 	const (
-		name         = "Cartoni animati"
+		name         = "Morning playlist"
 		startCluster = uint32(123)
 		size         = uint32(456)
 	)
@@ -1677,24 +1677,24 @@ func TestSplitFilePath(t *testing.T) {
 		name   string
 	}{
 		{
-			path:   "/Music/Pollon.mp3",
+			path:   "/Music/Demo Track.mp3",
 			parent: "/Music",
-			name:   "Pollon.mp3",
+			name:   "Demo Track.mp3",
 		},
 		{
-			path:   "/Music/Cartoni animati/New Song.mp3",
-			parent: "/Music/Cartoni animati",
+			path:   "/Music/Morning playlist/New Song.mp3",
+			parent: "/Music/Morning playlist",
 			name:   "New Song.mp3",
 		},
 		{
-			path:   "Pollon.mp3",
+			path:   "Demo Track.mp3",
 			parent: ".",
-			name:   "Pollon.mp3",
+			name:   "Demo Track.mp3",
 		},
 		{
-			path:   "/Pollon.mp3",
+			path:   "/Demo Track.mp3",
 			parent: "/",
-			name:   "Pollon.mp3",
+			name:   "Demo Track.mp3",
 		},
 	}
 
@@ -1728,7 +1728,7 @@ func TestSplitFilePath(t *testing.T) {
 //
 //	root (cluster 2)
 //	└── Music (cluster 3)
-//	    └── Cartoni animati (cluster 4)
+//	    └── Morning playlist (cluster 4)
 func TestFindDirectoryCluster(t *testing.T) {
 	const (
 		sectorSize      = 512
@@ -1736,9 +1736,9 @@ func TestFindDirectoryCluster(t *testing.T) {
 		fatOffset       = 0
 		dataOffset      = 512
 
-		rootCluster    = uint32(2)
-		musicCluster   = uint32(3)
-		cartoniCluster = uint32(4)
+		rootCluster     = uint32(2)
+		musicCluster    = uint32(3)
+		playlistCluster = uint32(4)
 	)
 
 	data := make([]byte, dataOffset+3*bytesPerCluster)
@@ -1746,11 +1746,11 @@ func TestFindDirectoryCluster(t *testing.T) {
 	// Directory chain:
 	// root (2) -> EOF
 	// Music (3) -> EOF
-	// Cartoni animati (4) -> EOF
+	// Morning playlist (4) -> EOF
 	for _, cluster := range []uint32{
 		rootCluster,
 		musicCluster,
-		cartoniCluster,
+		playlistCluster,
 	} {
 		binary.LittleEndian.PutUint32(
 			data[fatOffset+cluster*4:],
@@ -1810,8 +1810,8 @@ func TestFindDirectoryCluster(t *testing.T) {
 	}
 
 	musicRecord, err := encodeDirectoryRecord(
-		"Cartoni animati",
-		cartoniCluster,
+		"Morning playlist",
+		playlistCluster,
 		0,
 	)
 	if err != nil {
@@ -1848,8 +1848,8 @@ func TestFindDirectoryCluster(t *testing.T) {
 		{path: ".", want: rootCluster},
 		{path: "/Music", want: musicCluster},
 		{
-			path: "/Music/Cartoni animati",
-			want: cartoniCluster,
+			path: "/Music/Morning playlist",
+			want: playlistCluster,
 		},
 	}
 
