@@ -1,26 +1,60 @@
-# Samsung YP-Z5 File Manager
+<p align="center">
+  <img src="assets/yp-z5a.png" alt="Samsung YP-Z5A" width="160">
+</p>
 
-TUI for managing files on FAT32 partition,
-initially targeted at the Samsung YP-Z5 player.
+<h1 align="center">ypz5</h1>
 
+<p align="center">
+  A terminal file manager for the <b>Samsung YP-Z5</b> MP3 player<br>
+  (and perhaps any other FAT32 disk or image: <em>no guarantees!</em>).
+</p>
 
-## Running the TUI
+---
 
-The tool works on either a disk image or the real device. It opens
-read-only unless `--write` is given.
+The YP-Z5 shows up on a Mac as a plain FAT32 disk, but Finder litters it
+with `.DS_Store` and `._*` files and gives no control over what is written.
+`ypz5` talks to the filesystem directly: browse the player, copy music
+from your Mac, and delete files, all from a keyboard-driven TUI.
+
+## Features
+
+- **Browse** the player's folders, with file details and protected
+  system entries clearly marked.
+- **Copy** files and folders from the Mac into `/Music` (or any folder you
+  pick). Existing files are skipped, never overwritten; folders are merged.
+- **Delete** files and folders, with confirmation.
+- **Safe by default**: opens read-only unless `--write` is given, refuses
+  to write while the disk is mounted, checks free space before copying,
+  and never copies `.DS_Store` or `._*` files.
+- **Crash-tolerant writes**: an interrupted operation can at worst leak
+  free space, never corrupt the filesystem.
+- Works on the **real device** or on a **disk image**, whole disk (with
+  MBR) or bare partition.
+
+## Installation
+
+Requires [Go](https://go.dev/dl/) 1.27 or later.
 
 ```sh
-go run . --image PATH  [--write]     # a disk image file
-go run . --device PATH [--write]     # a device node, e.g. /dev/rdisk4
+go install github.com/piero/ypz5@latest
 ```
 
-Either a whole disk (with its MBR) or a single partition works: the FAT32
-partition is found automatically.
+or build from a checkout:
 
-Screens are color-coded by the filesystem they operate on: **blue/cyan**
-for the YP-Z5 (device or image), **amber/orange** for the Mac's local
-files. Each screen also starts with a ` YP-Z5 ` or ` MAC ` tag. Set
-`NO_COLOR=1` to disable colors.
+```sh
+go build -o ypz5 .
+```
+
+## Usage
+
+```sh
+ypz5 --image PATH  [--write]     # a disk image file
+ypz5 --device PATH [--write]     # a device node, e.g. /dev/rdisk4
+```
+
+Screens are color-coded by the filesystem they operate on:
+**blue/cyan** for the YP-Z5, **amber/orange** for the Mac's local files.
+Set `NO_COLOR=1` to disable colors.
 
 ### Keys
 
@@ -32,53 +66,14 @@ files. Each screen also starts with a ` YP-Z5 ` or ` MAC ` tag. Set
 | Destination     | Browse device folders as above, `s` copy into the current folder, `Esc` cancel |
 | Copying         | `Esc` cancels after the current file                                 |
 
-Files are copied into `/Music` by default; press `t` on the add-files
-screen to pick another device folder.
-`.DS_Store` and `._*` files are never copied, existing files are skipped
-(never overwritten), and existing folders are merged into. Free space is
-checked before anything is written.
-
 Entries marked `(protected)` (read-only or system, such as `System`,
 `DevIcon.fil` and `DevLogo.fil`) cannot be deleted.
 
-### On a disk image
-
-Reading is always safe:
-
-```sh
-go run . --image images/yp-z5a-full-20261009.img
-```
-
-To try writing, use a copy so the pristine image is never modified
-(`cp -c` makes an instant APFS clone):
-
-```sh
-cp -c images/yp-z5a-full-20261009.img /tmp/scratch.img
-chmod u+w /tmp/scratch.img
-go run . --image /tmp/scratch.img --write
-```
-
-Check the result afterwards:
-
-```sh
-go run ./cmd/inspect -path /Music /tmp/scratch.img
-```
-
-and with macOS's own checker. `fsck_msdos` reads a bare partition
-directly, but a full disk image (with its MBR) must be attached first,
-without mounting it:
-
-```sh
-hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage /tmp/scratch.img
-# prints e.g. /dev/disk7 and /dev/disk7s1
-fsck_msdos -n /dev/disk7s1
-hdiutil detach /dev/disk7
-```
-
 ### On the real device
 
-Before writing to the player, make sure a recent backup image exists
-(see [Creating an image from the device](#creating-an-image-from-the-device)).
+> [!WARNING]
+> Make a backup image of the player before writing to it
+> (see [Backing up the device](#backing-up-the-device)).
 
 1. Connect the player and find its disk (about 2.0 GB, named `YP-Z5`):
 
@@ -89,199 +84,56 @@ Before writing to the player, make sure a recent backup image exists
    The examples below use `disk4`. **Check the number every time**: it
    can change between connections.
 
-2. Unmount it. macOS mounts the player automatically, and the tool
-   refuses to write while any part of the disk is mounted, because two
-   writers would corrupt the filesystem:
+2. Unmount it. macOS mounts the player automatically, and `ypz5` refuses
+   to write while any part of the disk is mounted:
 
    ```sh
    diskutil unmountDisk /dev/disk4
    ```
 
-3. Run the tool. Device nodes need `sudo`; use the raw node `rdisk`,
-   which is much faster:
+3. Run `ypz5`. Device nodes need `sudo`; the raw node `rdisk` is much
+   faster:
 
    ```sh
-   go build -o ypz5 .
-   sudo ./ypz5 --device /dev/rdisk4            # read-only
-   sudo ./ypz5 --device /dev/rdisk4 --write    # read/write, asks to confirm
+   sudo ypz5 --device /dev/rdisk4            # read-only
+   sudo ypz5 --device /dev/rdisk4 --write    # read/write, asks to confirm
    ```
 
    Every operation is flushed to the device when it finishes. Don't
-   unplug the player while a copy or delete is running; if it happens,
-   the worst case is lost free space (clusters still marked in use), not
-   a corrupted filesystem.
+   unplug the player while a copy or delete is running.
 
-4. Optionally check the filesystem, then eject:
+4. Eject, unplug, and let the player rebuild its library from `Music`:
 
    ```sh
-   sudo fsck_msdos -n /dev/rdisk4s1
-   sudo go run ./cmd/inspect -path /Music /dev/rdisk4
    diskutil eject /dev/disk4
    ```
 
-5. Unplug the player and let it rebuild its library from `Music`.
+### Backing up the device
 
-### Restoring a backup
+With the player connected and unmounted (steps 1–2 above):
 
-If anything goes wrong, write the backup image back to the device. This
-overwrites the whole disk: double-check the disk number first.
+```sh
+sudo dd if=/dev/rdisk4 of=yp-z5a-backup.img bs=1m status=progress
+sudo chown $USER yp-z5a-backup.img
+```
+
+To restore it, which overwrites the whole disk (double-check the number):
 
 ```sh
 diskutil unmountDisk /dev/disk4
-sudo dd if=images/yp-z5a-full-20261009.img of=/dev/rdisk4 bs=1m status=progress
+sudo dd if=yp-z5a-backup.img of=/dev/rdisk4 bs=1m status=progress
 diskutil eject /dev/disk4
 ```
 
-## Application structure
+## Documentation
 
-```
-main.go                  flags; opens the storage and the filesystem; starts the TUI
-cmd/inspect/             read-only inspection tool
-internal/tui/            Bubble Tea screens
-  model.go                 state, dispatch to the active screen, scrolling
-  browser.go               YP-Z5 browser and file details
-  local.go                 "add files from this Mac" screen
-  local_browser.go         local folder listing and selection
-  picker.go                destination picker
-  copy.go                  copy progress and summary
-  confirm.go               device-write and delete confirmations
-  scroll.go, theme.go      list scrolling; color palettes
-internal/transfer/       copy planning and execution (Mac → YP-Z5), no UI
-internal/storage/        image/device access: partition offset, flush, mount guard
-internal/testimage/      test helper: writable clone of the YP-Z5 image
-fat32/                   the FAT32 filesystem (see `go doc ./fat32`)
-```
+- [Technical overview](docs/TECHNICAL.md): architecture, the FAT32
+  package, and how writes stay safe.
+- [Development guide](docs/DEVELOPMENT.md): working with disk images,
+  running the tests, and contributing.
 
-```
-┌─────────────────┐      ┌──────────────────┐
-│  internal/tui   │─────▶│ internal/transfer│
-└────────┬────────┘      └────────┬─────────┘
-         │                        │
-         ▼                        ▼
-┌──────────────────────────────────────────┐
-│                 fat32                    │
-└────────────────────┬─────────────────────┘
-                     │ io.ReaderAt / io.WriterAt
-┌────────────────────▼─────────────────────┐
-│             internal/storage             │
-└────────────────────┬─────────────────────┘
-                     ▼
-        disk image  or  /dev/rdisk4
-```
+## Disclaimer
 
-The FAT32 package allows navigating the filesystem without knowing anything about physical sectors:
-
-```
-boot sector
-    ↓
-FAT layout
-    ↓
-FAT entries
-    ↓
-cluster chain
-    ↓
-directory entries / LFN
-    ↓
-file contents
-```
-
-
-## Disk images
-
-Tests and experiments should run against an image of the device, never
-the device itself.
-
-### Creating an image from the device
-
-With the YP-Z5 connected:
-
-```sh
-diskutil list                       # find the ~2.0 GB YP-Z5 disk, e.g. /dev/disk4
-diskutil unmountDisk /dev/disk4     # nothing may be mounted while dumping
-sudo dd if=/dev/rdisk4 of=images/yp-z5a-full-$(date +%Y%m%d).img bs=1m status=progress
-sudo chown $USER images/yp-z5a-full-*.img
-diskutil eject /dev/disk4
-```
-
-`/dev/rdisk4` is the raw (unbuffered) device node, which is much faster
-than `/dev/disk4`. The dump includes the MBR; the FAT32 partition starts
-at sector 32.
-
-### Checksum and write protection
-
-Record a checksum, then make the image read-only so it stays pristine:
-
-```sh
-shasum -a 256 images/yp-z5a-full-20261009.img > images/yp-z5a-full-20261009.img.sha256
-chmod a-w images/yp-z5a-full-20261009.img
-```
-
-To verify it later:
-
-```sh
-shasum -a 256 -c images/yp-z5a-full-20261009.img.sha256
-```
-
-To experiment with the TUI in read/write mode, work on a copy (see
-[On a disk image](#on-a-disk-image)).
-
-
-## Running the tests
-
-Unit tests need no setup:
-
-```sh
-go test ./...
-```
-
-The integration tests are skipped unless `YP_Z5_IMAGE` points at a disk
-image. Run from the repository root:
-
-```sh
-YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test ./...
-```
-
-- Any consistent FAT32 image works, not only a YP-Z5 dump: a whole disk
-  with an MBR or a bare partition. The partition is found automatically,
-  the tests create the files and folders they need (at the root, named
-  `YPZ5 …`), and tests that need existing files use whatever the image
-  contains, skipping when it has none.
-- The path must be absolute (hence `$PWD`): `go test` runs each package
-  from its own directory, so a relative path would not be found.
-- The image may be read-only and is never modified. Each mutating test
-  works on its own copy (an APFS clone on macOS) in a temporary
-  directory, and checks that the filesystem is still consistent
-  afterwards.
-- If the image itself is damaged (lost or cross-linked clusters),
-  `TestYPZ5ImageIsConsistent` fails and the mutating tests are skipped:
-  repair the image first, e.g. with `fsck_msdos`.
-
-To create a small test image without a device (mtools):
-
-```sh
-mformat -C -F -T 163840 -h 16 -s 32 -c 1 -i /tmp/test.img ::
-mcopy -s -i /tmp/test.img ~/Music/SomeAlbum ::/
-YP_Z5_IMAGE=/tmp/test.img go test ./...
-```
-
-Useful variations:
-
-```sh
-# only the image tests in fat32, verbose
-YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test ./fat32 -run YPZ5 -v
-
-# ignore cached results, e.g. after replacing the image
-YP_Z5_IMAGE="$PWD/images/yp-z5a-full-20261009.img" go test -count=1 ./...
-```
-
-
-## Inspecting an image or device
-
-`cmd/inspect` prints the filesystem geometry, the free space recorded in
-FSInfo and a detailed listing of one directory (attributes, modification
-date, 8.3 name, size, first cluster). It only reads.
-
-```sh
-go run ./cmd/inspect -path /Music images/yp-z5a-full-20261009.img
-sudo go run ./cmd/inspect -path /Music /dev/rdisk4    # device, unmounted
-```
+This is an unofficial project, not affiliated with or endorsed by
+Samsung. Writing to a device's filesystem always carries some risk: keep a
+backup.
