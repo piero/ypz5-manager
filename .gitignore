@@ -1,1 +1,12 @@
+# macOS
 .DS_Store
+._*
+
+# Build output
+/ypz5-manager
+
+# Disk images and raw dumps (may contain personal data)
+/images/
+*.img
+*.img.sha256
+*.bin
